@@ -1,0 +1,66 @@
+// backend/prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider     = "postgresql"
+  url          = env("DATABASE_URL")
+  relationMode = "prisma" // Keep if using Supabase pooler on port 6543, or if you have other reasons.
+                           // Can often be removed if using direct DB connection or pooler on port 5432.
+}
+
+model User {
+  id                       String    @id @default(cuid())
+  supabaseAuthId           String    @unique
+  username                 String    @unique
+  email                    String?
+  displayName              String?
+  bio                      String?
+  profileImageUrl          String?   // Existing avatar URL
+  bannerImageUrl           String?   // NEW: For banner image URL
+
+  stripeAccountId          String?   @unique
+  stripeOnboardingComplete Boolean   @default(false)
+  
+  links                    Link[]
+  paymentsReceived         Payment[] @relation("RecipientPayments")
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+  @@index([supabaseAuthId])
+  @@index([username])
+}
+
+model Link {
+  id          String   @id @default(cuid())
+  title       String
+  url         String
+  userId      String   // Foreign key to User
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order       Int?     // For custom ordering
+  clicks      Int      @default(0) // Optional click tracking
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model Payment {
+  id                    String    @id @default(cuid())
+  stripePaymentIntentId String    @unique // From Stripe (e.g., pi_xxxx)
+  amount                Int       // In cents
+  currency              String    // e.g., "usd"
+  status                String    // e.g., "succeeded", "paid"
+  recipientUserId       String    // Foreign key to User who received payment
+  recipient             User      @relation("RecipientPayments", fields: [recipientUserId], references: [id], onDelete: Restrict)
+  
+  // Optional details about the payer
+  payerName             String?
+  payerEmail            String?   // Be mindful of PII
+  
+  platformFee           Int?      // Platform fee taken, in cents
+  netAmountToRecipient  Int?      // amount - platformFee, in cents
+  
+  createdAt             DateTime  @default(now())
+}
