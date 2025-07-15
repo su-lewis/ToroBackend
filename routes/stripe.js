@@ -138,28 +138,92 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
 
 // 3. Create Stripe Checkout Session
 router.post('/create-checkout-session', async (req, res) => {
-  // ... (Keep this route exactly as the last full version, with 10% platform fee and metadata)
-  console.log("[Stripe Router] POST /create-checkout-session hit. Body:", req.body); 
-  if (!req.body) { console.error("[Stripe Router /create-checkout-session] Error: req.body is undefined."); return res.status(400).json({ message: 'Request body is missing.' }); }
-  const { amount, recipientUsername } = req.body;
-  if (!amount || !recipientUsername || isNaN(parseFloat(amount)) || parseFloat(amount) < 0.50) { return res.status(400).json({ message: 'Valid amount (min $0.50) and recipient username required.' });}
-  const amountInCents = Math.round(parseFloat(amount) * 100);
+  console.log("[Stripe Router] POST /create-checkout-session hit. Body:", req.body);
+  if (!req.body) { /* ... error ... */ }
+
+  // `amountFromDonorInput` is the amount the donor WANTS THE CREATOR TO RECEIVE
+  const { amount: amountFromDonorInput, recipientUsername } = req.body; 
+
+  if (!amountFromDonorInput || !recipientUsername || isNaN(parseFloat(amountFromDonorInput)) || parseFloat(amountFromDonorInput) < 0.50) {
+    return res.status(400).json({ message: 'Valid amount for creator (min $0.50) and recipient username required.' });
+  }
+
+  const creatorReceivesAmountInDollars = parseFloat(amountFromDonorInput);
+  const platformFeePercentage = 0.15; // Your 15% platform fee
+
+  // Calculate the gross amount the donor needs to pay
+  // GrossAmount = CreatorReceivesAmount / (1 - PlatformFeePercentage)
+  // This ensures that after your 10% fee is taken from GrossAmount, CreatorReceivesAmount remains.
+  const grossAmountInDollars = creatorReceivesAmountInDollars / (1 - platformFeePercentage);
+  
+  const grossAmountInCents = Math.round(grossAmountInDollars * 100);
+  const platformFeeInCents = Math.round(grossAmountInCents * platformFeePercentage); // Your fee on the gross
+  // const creatorGetsBeforeStripeFeesInCents = grossAmountInCents - platformFeeInCents; // Should be close to creatorReceivesAmountInDollars * 100
+
+  // Stripe minimum charge is typically 50 cents ($0.50)
+  if (grossAmountInCents < 50) {
+      return res.status(400).json({ message: 'Calculated amount to charge donor is too small (less than $0.50).' });
+  }
+  // Also, ensure the portion for the creator (before Stripe processing fees) is reasonable
+  if ((grossAmountInCents - platformFeeInCents) < 50) { 
+      return res.status(400).json({ message: 'Intended amount for creator is too small after platform fees.' });
+  }
+
+
   try {
-    const recipientUser = await prisma.user.findUnique({ where: { username: recipientUsername }, select: { id: true, username: true, displayName: true, stripeAccountId: true, stripeOnboardingComplete: true }});
-    if (!recipientUser) return res.status(404).json({ message: 'Recipient user not found.' });
-    if (!recipientUser.stripeAccountId || !recipientUser.stripeOnboardingComplete) return res.status(400).json({ message: 'Creator not set up for payments.' });
-    const platformFeePercentage = 0.10; const platformFeeInCents = Math.floor(amountInCents * platformFeePercentage);
-    if (amountInCents - platformFeeInCents < 50) return res.status(400).json({ message: 'Amount too small after platform fees.' });
+    const recipientUser = await prisma.user.findUnique({
+      where: { username: recipientUsername },
+      select: { id: true, username: true, displayName: true, stripeAccountId: true, stripeOnboardingComplete: true }
+    });
+
+    if (!recipientUser) { /* ... error ... */ return res.status(404).json({ message: 'Recipient user not found.' }); }
+    if (!recipientUser.stripeAccountId || !recipientUser.stripeOnboardingComplete) { /* ... error ... */ return res.status(400).json({ message: 'Creator not set up for payments.' }); }
+    
     const productName = `Support for ${recipientUser.displayName || recipientUser.username} via ${process.env.PLATFORM_DISPLAY_NAME || 'Our Platform'}`;
+    // The description will show the donor the total amount they are paying.
+    const paymentDescription = `You are paying $${grossAmountInDollars.toFixed(2)} to support ${recipientUser.displayName || recipientUser.username}. This includes a platform service fee.`;
+
+
+    console.log(`[Checkout] Input for creator: $${creatorReceivesAmountInDollars.toFixed(2)}`);
+    console.log(`[Checkout] Calculated Gross Charge: $${grossAmountInDollars.toFixed(2)} (${grossAmountInCents} cents)`);
+    console.log(`[Checkout] Calculated Platform Fee: $${(platformFeeInCents/100).toFixed(2)} (${platformFeeInCents} cents)`);
+    console.log(`[Checkout] Creator will receive (before Stripe fees): $${((grossAmountInCents - platformFeeInCents)/100).toFixed(2)}`);
+
+
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'], line_items: [{ price_data: { currency: 'usd', product_data: { name: productName }, unit_amount: amountInCents }, quantity: 1 }], mode: 'payment',
-      success_url: `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}&recipient=${recipientUsername}`,
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: { 
+            name: productName,
+            description: paymentDescription // Optional: to show on Stripe Checkout page
+          },
+          unit_amount: grossAmountInCents, // Charge the donor the calculated gross amount
+        },
+        quantity: 1,
+      }],
+      mode: 'payment',
+      success_url: `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}&recipient=${recipientUsername}&amount_sent=${creatorReceivesAmountInDollars.toFixed(2)}`, // Pass intended amount
       cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
-      payment_intent_data: { application_fee_amount: platformFeeInCents > 0 ? platformFeeInCents : undefined, transfer_data: { destination: recipientUser.stripeAccountId }, description: `Payment to ${recipientUser.username} via ${process.env.PLATFORM_DISPLAY_NAME || 'Our Platform'}`,},
-      metadata: { appRecipientUserId: recipientUser.id, appRecipientUsername: recipientUser.username, platformFeeCharged: platformFeeInCents.toString(), totalAmountPaidByDonor: amountInCents.toString(),},
+      payment_intent_data: {
+        application_fee_amount: platformFeeInCents > 0 ? platformFeeInCents : undefined, // Your calculated platform fee
+        transfer_data: { destination: recipientUser.stripeAccountId },
+        description: `Payment for ${recipientUser.username} (creator receives ~$${creatorReceivesAmountInDollars.toFixed(2)}) via ${process.env.PLATFORM_DISPLAY_NAME || 'Our Platform'}`,
+      },
+      metadata: {
+        appRecipientUserId: recipientUser.id,
+        appRecipientUsername: recipientUser.username,
+        platformFeeCalculated: platformFeeInCents.toString(),
+        grossAmountChargedToDonor: grossAmountInCents.toString(),
+        intendedAmountForCreator: (creatorReceivesAmountInDollars * 100).toString(),
+      },
     });
     res.json({ id: session.id });
-  } catch (error) { console.error('[Stripe Router /create-checkout-session] Error:', error.message, error.stack); res.status(500).json({ message: 'Error creating payment session', error: error.message });}
+  } catch (error) {
+    console.error('[Stripe Router /create-checkout-session] Error:', error.message, error.stack);
+    res.status(500).json({ message: 'Error creating payment session', error: error.message });
+  }
 });
 
 // 4. Stripe Webhook Handler
