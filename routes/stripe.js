@@ -1,11 +1,12 @@
 // backend/routes/stripe.js
 const express = require('express');
 const router = express.Router();
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+// Stripe client is initialized with secret key from .env
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY); 
 const prisma = require('../lib/prisma'); // Using the separated Prisma client
 const { authMiddleware } = require('../middleware/auth');
 
-// Environment variable checks at module load time
+// Environment variable checks at module load time for better startup diagnostics
 if (!process.env.STRIPE_SECRET_KEY) {
     console.error("FATAL BACKEND ERROR: STRIPE_SECRET_KEY is not defined in .env. Stripe routes will fail catastrophically.");
 }
@@ -13,7 +14,7 @@ if (!process.env.STRIPE_WEBHOOK_SECRET) {
     console.warn("WARNING: STRIPE_WEBHOOK_SECRET is not defined in .env. Webhook signature verification will fail.");
 }
 if (!process.env.FRONTEND_URL) {
-    console.warn("WARNING: FRONTEND_URL is not defined in .env. Stripe redirect URLs may be invalid, leading to errors.");
+    console.warn("WARNING: FRONTEND_URL is not defined in .env. Stripe redirects may be invalid, leading to errors.");
 }
 if (!process.env.PLATFORM_DISPLAY_NAME) {
     console.warn("WARNING: PLATFORM_DISPLAY_NAME is not defined in .env. Descriptions sent to Stripe may be generic.");
@@ -24,199 +25,126 @@ console.log("[Stripe Router] File loaded and router instance created.");
 // 1. Create Stripe Connect Account and Onboarding Link
 router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
   console.log("--- [Stripe Router] POST /connect/onboard-user START ---");
-  console.log("[Stripe Router /onboard-user] req.user (Supabase User ID):", req.user ? req.user.id : "undefined");
-  console.log("[Stripe Router /onboard-user] req.localUser (Prisma User ID):", req.localUser ? req.localUser.id : "undefined");
-
   try {
     if (!req.localUser || !req.localUser.id) {
-      console.error("[Stripe Router /onboard-user] Error: Application user profile (localUser) not found or missing ID.");
-      return res.status(403).json({ message: 'User application profile is not fully set up. Please complete your profile on our site first (e.g., set a username).' });
+      return res.status(403).json({ message: 'Application profile setup is required before connecting Stripe.' });
     }
     const appUserId = req.localUser.id;
     const appProfile = req.localUser;
 
     if (!appProfile.username) {
-        console.error(`[Stripe Router /onboard-user] Error: Username missing for appUser ${appUserId}. Profile URL cannot be constructed.`);
         return res.status(400).json({ message: 'A username is required in your profile to connect with Stripe.' });
     }
-
     const emailForStripe = req.user?.email || appProfile?.email;
     if (!emailForStripe) {
-        console.error(`[Stripe Router /onboard-user] Error: Email address not available for user ${appUserId} for Stripe account creation.`);
         return res.status(400).json({ message: 'An email address is required to connect with Stripe.' });
     }
-    
     const platformBaseUrl = process.env.FRONTEND_URL;
-    if (!platformBaseUrl || !platformBaseUrl.startsWith('http')) { // Basic check for a valid URL
-        console.error("[Stripe Router /onboard-user] CRITICAL: FRONTEND_URL is not defined or is invalid in .env! Value:", platformBaseUrl);
-        return res.status(500).json({ message: 'Server configuration error: Frontend URL for Stripe redirects is missing or invalid.' });
+    if (!platformBaseUrl || !platformBaseUrl.startsWith('http')) {
+        return res.status(500).json({ message: 'Server configuration error: FRONTEND_URL is missing or invalid.' });
     }
 
     let stripeAccountId = appProfile.stripeAccountId;
-
     if (!stripeAccountId) {
-      console.log(`[Stripe Router /onboard-user] No Stripe Account ID for user ${appUserId}. Creating new Stripe Express account.`);
-      
       const userProfileUrlOnPlatform = `${platformBaseUrl}/${appProfile.username}`;
       const productDescriptionOnPlatform = `Receiving tips and support via their page on ${process.env.PLATFORM_DISPLAY_NAME || 'our platform'}.`;
 
-      console.log("[Stripe Router /onboard-user] URL for business_profile.url:", userProfileUrlOnPlatform);
-      console.log("[Stripe Router /onboard-user] Product description:", productDescriptionOnPlatform);
-      console.log("[Stripe Router /onboard-user] Email for Stripe account:", emailForStripe);
-      console.log("[Stripe Router /onboard-user] Country for Stripe account (defaulting/from profile):", appProfile.country || 'US');
-
-
-      const accountParams = {
-        type: 'express',
-        country: appProfile.country || 'US', // Default to 'US', or make this configurable/collect from user
-        email: emailForStripe,
-        business_type: 'individual',
-        business_profile: {
-          url: userProfileUrlOnPlatform,
-          mcc: '8999', // Professional Services (generic for creators/tips)
-          product_description: productDescriptionOnPlatform,
-        },
-        capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
-      };
+      console.log(`[Stripe Router /onboard-user] Creating new Stripe Express account for user ${appUserId}.`);
       
-      const account = await stripe.accounts.create(accountParams);
+      const account = await stripe.accounts.create({
+        type: 'express', country: 'US', email: emailForStripe, business_type: 'individual',
+        business_profile: { url: userProfileUrlOnPlatform, mcc: '8999', product_description: productDescriptionOnPlatform },
+        capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
+      });
       stripeAccountId = account.id;
-      console.log(`[Stripe Router /onboard-user] Created Stripe Account ${stripeAccountId} for user ${appUserId}.`);
       
       await prisma.user.update({
         where: { id: appUserId },
         data: { stripeAccountId: stripeAccountId, stripeOnboardingComplete: false },
       });
-      console.log(`[Stripe Router /onboard-user] Updated user ${appUserId} with Stripe Account ID.`);
-    } else {
-      console.log(`[Stripe Router /onboard-user] User ${appUserId} already has Stripe Account ID: ${stripeAccountId}. Proceeding to create account link.`);
+      console.log(`[Stripe Router /onboard-user] User ${appUserId} updated with new Stripe Account ID: ${stripeAccountId}.`);
     }
-
-    const refreshUrlForStripe = `${platformBaseUrl}/connect-stripe?reauth=true&stripe_account_id=${stripeAccountId}`;
-    const returnUrlForStripe = `${platformBaseUrl}/connect-stripe?status=success&stripe_account_id=${stripeAccountId}`;
-    console.log("[Stripe Router /onboard-user] refresh_url for AccountLink:", refreshUrlForStripe);
-    console.log("[Stripe Router /onboard-user] return_url for AccountLink:", returnUrlForStripe);
 
     const accountLink = await stripe.accountLinks.create({
       account: stripeAccountId,
-      refresh_url: refreshUrlForStripe,
-      return_url: returnUrlForStripe,
+      refresh_url: `${platformBaseUrl}/connect-stripe?reauth=true&stripe_account_id=${stripeAccountId}`,
+      return_url: `${platformBaseUrl}/connect-stripe?status=success&stripe_account_id=${stripeAccountId}`,
       type: 'account_onboarding',
     });
-    
-    // console.log(`[Stripe Router /onboard-user] Created account link for ${stripeAccountId}. URL (partial): ${accountLink.url.substring(0,50)}...`);
     res.json({ url: accountLink.url });
-
   } catch (error) {
-    console.error('[Stripe Router /onboard-user] CRITICAL ERROR in /connect/onboard-user:', error.message, error.type ? `Type: ${error.type}` : '', error.code ? `Code: ${error.code}` : '', error.param ? `Param: ${error.param}` : '', error.stack);
+    console.error('[/onboard-user] Stripe Connect onboarding error:', error.message, error.stack);
     res.status(500).json({ message: 'Error creating Stripe onboarding link', error: error.message });
   }
-  console.log("--- [Stripe Router] POST /connect/onboard-user END ---");
 });
 
 // 2. Get Stripe Account Status
 router.get('/connect/account-status', authMiddleware, async (req, res) => {
-  // ... (Keep this route exactly as the last full version provided)
-  console.log("[Stripe Router] GET /connect/account-status hit.");
-  try {
-    const appUserId = req.localUser?.id;
-    if (!appUserId) { console.log("[Stripe Router /account-status] Error: User profile not found (no localUser.id)."); return res.status(403).json({ message: 'User profile not found.' });}
-    const user = req.localUser;
-    if (!user.stripeAccountId) { console.log(`[Stripe Router /account-status] User ${appUserId} has no Stripe Account ID.`); return res.status(404).json({ message: 'Stripe account not connected for this user.' });}
-    const account = await stripe.accounts.retrieve(user.stripeAccountId);
-    const onboardingComplete = !!(account.charges_enabled && account.details_submitted && account.payouts_enabled);
-    if (user.stripeOnboardingComplete !== onboardingComplete) {
-      console.log(`[Stripe Router /account-status] Updating onboarding status for user ${appUserId} to ${onboardingComplete}.`);
-      await prisma.user.update({ where: { id: appUserId }, data: { stripeOnboardingComplete: onboardingComplete }});
-    }
-    res.json({ stripeAccountId: user.stripeAccountId, detailsSubmitted: account.details_submitted, chargesEnabled: account.charges_enabled, payoutsEnabled: account.payouts_enabled, onboardingComplete: onboardingComplete });
-  } catch (error) {
-    console.error('[Stripe Router /account-status] Error fetching Stripe account status:', error.message, error.stack);
-    res.status(500).json({ message: 'Error fetching Stripe account status', error: error.message });
-  }
+    // ... (This route remains the same as the last version) ...
+    try {
+        if (!req.localUser?.id) return res.status(403).json({ message: 'User profile not found.' });
+        const user = req.localUser;
+        if (!user.stripeAccountId) return res.status(404).json({ message: 'Stripe account not connected.' });
+        const account = await stripe.accounts.retrieve(user.stripeAccountId);
+        const onboardingComplete = !!(account.charges_enabled && account.details_submitted && account.payouts_enabled);
+        if (user.stripeOnboardingComplete !== onboardingComplete) {
+          await prisma.user.update({ where: { id: user.id }, data: { stripeOnboardingComplete: onboardingComplete }});
+          console.log(`[/account-status] Onboarding status for user ${user.id} updated to ${onboardingComplete}`);
+        }
+        res.json({ stripeAccountId: user.stripeAccountId, detailsSubmitted: account.details_submitted, chargesEnabled: account.charges_enabled, payoutsEnabled: account.payouts_enabled, onboardingComplete: onboardingComplete });
+      } catch (error) {
+        console.error('[/account-status] Error:', error.message, error.stack);
+        res.status(500).json({ message: 'Error fetching Stripe status', error: error.message });
+      }
 });
 
-// 3. Create Stripe Checkout Session
+// 3. Create Stripe Checkout Session (with 15% fee on top model)
 router.post('/create-checkout-session', async (req, res) => {
   console.log("[Stripe Router] POST /create-checkout-session hit. Body:", req.body);
-  if (!req.body) { /* ... error ... */ }
-
-  // `amountFromDonorInput` is the amount the donor WANTS THE CREATOR TO RECEIVE
-  const { amount: amountFromDonorInput, recipientUsername } = req.body; 
-
-  if (!amountFromDonorInput || !recipientUsername || isNaN(parseFloat(amountFromDonorInput)) || parseFloat(amountFromDonorInput) < 0.50) {
-    return res.status(400).json({ message: 'Valid amount for creator (min $0.50) and recipient username required.' });
+  if (!req.body) {
+    return res.status(400).json({ message: 'Request body missing.' });
   }
-
-  const creatorReceivesAmountInDollars = parseFloat(amountFromDonorInput);
-  const platformFeePercentage = 0.15; // Your 15% platform fee
-
-  // Calculate the gross amount the donor needs to pay
-  // GrossAmount = CreatorReceivesAmount / (1 - PlatformFeePercentage)
-  // This ensures that after your 10% fee is taken from GrossAmount, CreatorReceivesAmount remains.
-  const grossAmountInDollars = creatorReceivesAmountInDollars / (1 - platformFeePercentage);
-  
-  const grossAmountInCents = Math.round(grossAmountInDollars * 100);
-  const platformFeeInCents = Math.round(grossAmountInCents * platformFeePercentage); // Your fee on the gross
-  // const creatorGetsBeforeStripeFeesInCents = grossAmountInCents - platformFeeInCents; // Should be close to creatorReceivesAmountInDollars * 100
-
-  // Stripe minimum charge is typically 50 cents ($0.50)
+  const { amount: creatorReceivesAmountDollars, recipientUsername } = req.body;
+  if (!recipientUsername || isNaN(parseFloat(creatorReceivesAmountDollars)) || parseFloat(creatorReceivesAmountDollars) < 1.00) {
+    return res.status(400).json({ message: 'Valid amount for creator (min $1.00) and recipient username required.' });
+  }
+  const creatorReceivesAmount = parseFloat(creatorReceivesAmountDollars);
+  const platformFeePercentage = 0.15; // Your flat 15% fee
+  const platformFeeDollars = creatorReceivesAmount * platformFeePercentage;
+  const grossAmountDollars = creatorReceivesAmount + platformFeeDollars;
+  const grossAmountInCents = Math.round(grossAmountDollars * 100);
+  const creatorReceivesAmountInCents = Math.round(creatorReceivesAmount * 100);
   if (grossAmountInCents < 50) {
-      return res.status(400).json({ message: 'Calculated amount to charge donor is too small (less than $0.50).' });
+      return res.status(400).json({ message: 'Calculated charge amount is too small.' });
   }
-  // Also, ensure the portion for the creator (before Stripe processing fees) is reasonable
-  if ((grossAmountInCents - platformFeeInCents) < 50) { 
-      return res.status(400).json({ message: 'Intended amount for creator is too small after platform fees.' });
-  }
-
-
   try {
     const recipientUser = await prisma.user.findUnique({
       where: { username: recipientUsername },
       select: { id: true, username: true, displayName: true, stripeAccountId: true, stripeOnboardingComplete: true }
     });
-
-    if (!recipientUser) { /* ... error ... */ return res.status(404).json({ message: 'Recipient user not found.' }); }
-    if (!recipientUser.stripeAccountId || !recipientUser.stripeOnboardingComplete) { /* ... error ... */ return res.status(400).json({ message: 'Creator not set up for payments.' }); }
+    if (!recipientUser || !recipientUser.stripeAccountId || !recipientUser.stripeOnboardingComplete) {
+      return res.status(400).json({ message: 'This creator is not currently set up to receive payments.' });
+    }
+    const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
+    const productDescription = `Total payment of $${grossAmountDollars.toFixed(2)} to support ${recipientUser.displayName || recipientUser.username} via ${process.env.PLATFORM_DISPLAY_NAME || 'Our Platform'}.`;
     
-    const productName = `Support for ${recipientUser.displayName || recipientUser.username} via ${process.env.PLATFORM_DISPLAY_NAME || 'Our Platform'}`;
-    // The description will show the donor the total amount they are paying.
-    const paymentDescription = `You are paying $${grossAmountInDollars.toFixed(2)} to support ${recipientUser.displayName || recipientUser.username}. This includes a platform service fee.`;
-
-
-    console.log(`[Checkout] Input for creator: $${creatorReceivesAmountInDollars.toFixed(2)}`);
-    console.log(`[Checkout] Calculated Gross Charge: $${grossAmountInDollars.toFixed(2)} (${grossAmountInCents} cents)`);
-    console.log(`[Checkout] Calculated Platform Fee: $${(platformFeeInCents/100).toFixed(2)} (${platformFeeInCents} cents)`);
-    console.log(`[Checkout] Creator will receive (before Stripe fees): $${((grossAmountInCents - platformFeeInCents)/100).toFixed(2)}`);
-
+    console.log(`[Checkout] Creator to get: $${creatorReceivesAmount.toFixed(2)}. Total donor charge: $${grossAmountDollars.toFixed(2)}.`);
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [{
-        price_data: {
-          currency: 'usd',
-          product_data: { 
-            name: productName,
-            description: paymentDescription // Optional: to show on Stripe Checkout page
-          },
-          unit_amount: grossAmountInCents, // Charge the donor the calculated gross amount
-        },
+        price_data: { currency: 'usd', product_data: { name: productName, description: productDescription }, unit_amount: grossAmountInCents, },
         quantity: 1,
       }],
       mode: 'payment',
-      success_url: `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}&recipient=${recipientUsername}&amount_sent=${creatorReceivesAmountInDollars.toFixed(2)}`, // Pass intended amount
+      success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${creatorReceivesAmount.toFixed(2)}`,
       cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
-      payment_intent_data: {
-        application_fee_amount: platformFeeInCents > 0 ? platformFeeInCents : undefined, // Your calculated platform fee
-        transfer_data: { destination: recipientUser.stripeAccountId },
-        description: `Payment for ${recipientUser.username} (creator receives ~$${creatorReceivesAmountInDollars.toFixed(2)}) via ${process.env.PLATFORM_DISPLAY_NAME || 'Our Platform'}`,
-      },
-      metadata: {
+      // NO application_fee_amount or transfer_data. The charge is on the platform.
+      // We will create the transfer in the webhook handler.
+      metadata: { 
         appRecipientUserId: recipientUser.id,
-        appRecipientUsername: recipientUser.username,
-        platformFeeCalculated: platformFeeInCents.toString(),
-        grossAmountChargedToDonor: grossAmountInCents.toString(),
-        intendedAmountForCreator: (creatorReceivesAmountInDollars * 100).toString(),
+        appRecipientStripeAccountId: recipientUser.stripeAccountId, // MUST pass this for the transfer
+        transferAmountCents: creatorReceivesAmountInCents.toString(), // The exact amount to transfer
       },
     });
     res.json({ id: session.id });
@@ -226,24 +154,70 @@ router.post('/create-checkout-session', async (req, res) => {
   }
 });
 
-// 4. Stripe Webhook Handler
-router.post( '/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-    // ... (Keep this webhook handler exactly as the last full version)
-    const sig = req.headers['stripe-signature']; const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET; let event;
-    try { event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret); } catch (err) { console.error(`[Stripe Webhook] Sig verification failed: ${err.message}`); return res.status(400).send(`Webhook Error: ${err.message}`); }
-    console.log(`[Stripe Webhook] Event received: ${event.type}, ID: ${event.id}`);
+// 4. Stripe Webhook Handler (with Separate Transfer logic)
+router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+    let event;
+    try { event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret); } catch (err) { console.error(`[Webhook] Sig verification failed: ${err.message}`); return res.status(400).send(`Webhook Error: ${err.message}`); }
+
+    console.log(`[Webhook] Event received: ${event.type}, ID: ${event.id}`);
     switch (event.type) {
-      case 'checkout.session.completed': /* ... (logic as before) ... */
-        const session = event.data.object; const appRecipientUserId = session.metadata?.appRecipientUserId; const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id; const platformFeeFromMeta = parseInt(session.metadata?.platformFeeCharged, 10); const totalAmountFromMeta = parseInt(session.metadata?.totalAmountPaidByDonor, 10);
-        if (appRecipientUserId && paymentIntentId && session.payment_status === 'paid') {
-          try { if (!paymentIntentId) { console.error('[Webhook] PI ID missing', session.id); return res.status(200).json({ received: true, error: "PI ID missing" });} const existingPayment = await prisma.payment.findUnique({ where: { stripePaymentIntentId: paymentIntentId }}); if (existingPayment) { console.log(`[Webhook] Payment ${paymentIntentId} already processed.`); return res.status(200).json({ received: true, message: "Already processed" });} const createdPayment = await prisma.payment.create({ data: { stripePaymentIntentId: paymentIntentId, amount: totalAmountFromMeta || session.amount_total, currency: session.currency.toLowerCase(), status: 'succeeded', recipientUserId: appRecipientUserId, payerEmail: session.customer_details?.email, platformFee: !isNaN(platformFeeFromMeta) ? platformFeeFromMeta : (session.application_fee_amount || 0), }, }); console.log(`[Webhook] Payment ${createdPayment.id} (PI: ${paymentIntentId}) recorded for user ${appRecipientUserId}.`); } catch (dbError) { console.error('[Webhook] DB error saving payment:', dbError.message, dbError.stack); return res.status(500).json({ error: "DB error" }); }
-        } else { console.warn('[Webhook] checkout.session.completed insufficient data/not paid:', { sessionId: session.id, paymentStatus: session.payment_status, appRecipientUserId, paymentIntentId }); }
+      case 'checkout.session.completed':
+        const session = event.data.object;
+        if (session.payment_status === 'paid') {
+          console.log('[Webhook] Checkout Session paid. Processing separate transfer.');
+          const metadata = session.metadata;
+          const recipientStripeAccountId = metadata?.appRecipientStripeAccountId;
+          const transferAmountCents = parseInt(metadata?.transferAmountCents, 10);
+          const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+          const appRecipientUserId = metadata?.appRecipientUserId;
+          if (!recipientStripeAccountId || !transferAmountCents || !paymentIntentId || !appRecipientUserId) {
+            console.error('[Webhook] CRITICAL: Metadata missing for transfer.', metadata);
+            return res.status(200).json({ received: true, error: "Metadata missing, cannot create transfer." }); // Ack to Stripe
+          }
+          try {
+            const existingPayment = await prisma.payment.findUnique({ where: { stripePaymentIntentId: paymentIntentId }});
+            if (existingPayment) {
+              console.log(`[Webhook] Payment ${paymentIntentId} already processed. Transfer will not be re-created.`);
+              return res.status(200).json({ received: true, message: "Already processed" });
+            }
+            console.log(`[Webhook] Creating transfer of ${transferAmountCents} cents to ${recipientStripeAccountId} from source PI ${paymentIntentId}`);
+            const transfer = await stripe.transfers.create({
+              amount: transferAmountCents, currency: 'usd', destination: recipientStripeAccountId,
+              source_transaction: paymentIntentId, // Link the transfer to the original charge
+            });
+            console.log(`[Webhook] Transfer created: ${transfer.id}`);
+            await prisma.payment.create({
+              data: {
+                stripePaymentIntentId: paymentIntentId, amount: session.amount_total, // Gross donor payment
+                currency: session.currency.toLowerCase(), status: 'succeeded', recipientUserId: appRecipientUserId,
+                payerEmail: session.customer_details?.email,
+                platformFee: session.amount_total - transferAmountCents, // Your GROSS profit
+              },
+            });
+            console.log(`[Webhook] Payment and Transfer for PI ${paymentIntentId} recorded successfully.`);
+          } catch (err) {
+            console.error('[Webhook] Error creating transfer or saving payment to DB:', err);
+            return res.status(500).json({ error: `Failed to process transfer: ${err.message}` }); // Tell Stripe to retry
+          }
+        }
         break;
-      case 'account.updated': /* ... (logic as before) ... */
-        const account = event.data.object; console.log(`[Webhook] account.updated for Stripe Account ID: ${account.id}`);
-        try { const userToUpdate = await prisma.user.findFirst({ where: { stripeAccountId: account.id } }); if (userToUpdate) { const onboardingComplete = !!(account.charges_enabled && account.details_submitted && account.payouts_enabled); if (userToUpdate.stripeOnboardingComplete !== onboardingComplete) { await prisma.user.update({ where: { id: userToUpdate.id }, data: { stripeOnboardingComplete: onboardingComplete }, }); console.log(`[Webhook] Updated onboarding for Stripe account ${account.id} to ${onboardingComplete}`); } } else { console.warn(`[Webhook] Received account.updated for unknown Stripe account ID ${account.id}`); } } catch (dbError) { console.error('[Webhook] DB error from account.updated:', dbError.message, dbError.stack); }
+      case 'account.updated':
+        const account = event.data.object;
+        console.log(`[Webhook] account.updated for Stripe Account ID: ${account.id}`);
+        try {
+          const userToUpdate = await prisma.user.findFirst({ where: { stripeAccountId: account.id } });
+          if (userToUpdate) {
+            const onboardingComplete = !!(account.charges_enabled && account.details_submitted && account.payouts_enabled);
+            if (userToUpdate.stripeOnboardingComplete !== onboardingComplete) {
+              await prisma.user.update({ where: { id: userToUpdate.id }, data: { stripeOnboardingComplete: onboardingComplete }});
+              console.log(`[Webhook] Updated onboarding for Stripe account ${account.id} to ${onboardingComplete}`);
+            }
+          } else { console.warn(`[Webhook] Received account.updated for unknown Stripe account ID ${account.id}`); }
+        } catch (dbError) { console.error('[Webhook] DB error from account.updated:', dbError); }
         break;
-      default: /* console.log(`[Webhook] Unhandled type: ${event.type}`); */
+      default: /* console.log(`[Webhook] Unhandled event type: ${event.type}`); */
     }
     res.status(200).json({ received: true });
   }
@@ -251,14 +225,13 @@ router.post( '/webhook', express.raw({ type: 'application/json' }), async (req, 
 
 // 5. CREATE STRIPE EXPRESS DASHBOARD LOGIN LINK
 router.post('/create-express-dashboard-link', authMiddleware, async (req, res) => {
-  // ... (Keep this route exactly as the last full version)
-  console.log("[Stripe Router] POST /create-express-dashboard-link hit.");
-  try {
-    const appUserId = req.localUser?.id; if (!appUserId) { return res.status(403).json({ message: 'User application profile not found.' });}
-    const user = req.localUser; if (!user.stripeAccountId || !user.stripeOnboardingComplete) { return res.status(400).json({ message: 'Stripe account not fully set up or not connected.' });}
-    const loginLink = await stripe.accounts.createLoginLink(user.stripeAccountId);
-    res.json({ url: loginLink.url });
-  } catch (error) { console.error('[Stripe Router /create-express-dashboard-link] Error:', error.message, error.stack); if (error.type === 'StripeInvalidRequestError' && error.message.includes('log in to your dashboard')) { return res.status(400).json({ message: 'Unable to generate dashboard link for this Stripe account type.' }); } res.status(500).json({ message: 'Error creating Stripe dashboard link', error: error.message }); }
+    // ... (This route remains the same as the last full version) ...
+    try {
+        if (!req.localUser?.id) return res.status(403).json({ message: 'User profile not found.' });
+        const user = req.localUser; if (!user.stripeAccountId || !user.stripeOnboardingComplete) return res.status(400).json({ message: 'Stripe account not fully set up.' });
+        const loginLink = await stripe.accounts.createLoginLink(user.stripeAccountId);
+        res.json({ url: loginLink.url });
+      } catch (error) { console.error('[/create-express-dashboard-link] Error:', error); if (error.type === 'StripeInvalidRequestError') return res.status(400).json({ message: 'Unable to generate dashboard link.' }); res.status(500).json({ message: 'Error creating dashboard link', error: error.message }); }
 });
 
 module.exports = router;
