@@ -128,10 +128,6 @@ app.use((err, req, res, next) => {
 });
 
 
-app.listen(PORT, () => {
-  console.log(`Backend server running. Listening on port ${PORT}`);
-  console.log(`CORS configured. Allowed origins: ${allowedOrigins.join(', ')}`);
-  if (!frontendUrlFromEnv) {
-    console.warn("Reminder: FRONTEND_URL env var is not set; using fallback for CORS.");
-  }
+app.listen(PORT, '0.0.0.0', () => { // Add '0.0.0.0'
+  console.log(`Backend server running on port ${PORT}, listening on all interfaces.`);
 });
