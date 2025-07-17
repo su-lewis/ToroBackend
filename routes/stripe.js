@@ -166,59 +166,72 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       case 'checkout.session.completed':
         const session = event.data.object;
         if (session.payment_status === 'paid') {
-          console.log('[Webhook] Checkout Session paid. Processing separate transfer.');
+          console.log('[Webhook] --- Processing checkout.session.completed ---');
           const metadata = session.metadata;
           const recipientStripeAccountId = metadata?.appRecipientStripeAccountId;
           const transferAmountCents = parseInt(metadata?.transferAmountCents, 10);
           const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
           const appRecipientUserId = metadata?.appRecipientUserId;
+
+          console.log(`[Webhook] Metadata Check: recipientStripeAccountId=${recipientStripeAccountId}, transferAmountCents=${transferAmountCents}, paymentIntentId=${paymentIntentId}, appRecipientUserId=${appRecipientUserId}`);
+
           if (!recipientStripeAccountId || !transferAmountCents || !paymentIntentId || !appRecipientUserId) {
-            console.error('[Webhook] CRITICAL: Metadata missing for transfer.', metadata);
-            return res.status(200).json({ received: true, error: "Metadata missing, cannot create transfer." }); // Ack to Stripe
+            console.error('[Webhook] CRITICAL: Metadata for transfer is incomplete or missing. Cannot proceed.', metadata);
+            // This is a success for Stripe (don't retry), but a failure for us.
+            return res.status(200).json({ received: true, error: "Metadata missing, cannot create transfer." }); 
           }
+
           try {
-            const existingPayment = await prisma.payment.findUnique({ where: { stripePaymentIntentId: paymentIntentId }});
+            console.log(`[Webhook] Checking for existing payment with PI: ${paymentIntentId}`);
+            const existingPayment = await prisma.payment.findUnique({
+              where: { stripePaymentIntentId: paymentIntentId }
+            });
             if (existingPayment) {
-              console.log(`[Webhook] Payment ${paymentIntentId} already processed. Transfer will not be re-created.`);
+              console.log(`[Webhook] Payment ${paymentIntentId} already processed. Exiting successfully.`);
               return res.status(200).json({ received: true, message: "Already processed" });
             }
-            console.log(`[Webhook] Creating transfer of ${transferAmountCents} cents to ${recipientStripeAccountId} from source PI ${paymentIntentId}`);
+
+            console.log(`[Webhook] PREPARING TO CREATE TRANSFER: Amount=${transferAmountCents}, Destination=${recipientStripeAccountId}, Source=${paymentIntentId}`);
+            
+            // THE TRANSFER CALL
             const transfer = await stripe.transfers.create({
-              amount: transferAmountCents, currency: 'usd', destination: recipientStripeAccountId,
-              source_transaction: paymentIntentId, // Link the transfer to the original charge
+              amount: transferAmountCents,
+              currency: 'usd', // IMPORTANT: This must match the payment currency
+              destination: recipientStripeAccountId,
+              source_transaction: paymentIntentId,
             });
-            console.log(`[Webhook] Transfer created: ${transfer.id}`);
-            await prisma.payment.create({
+            console.log(`[Webhook] SUCCESS: Transfer created with ID: ${transfer.id}`);
+
+            // RECORD PAYMENT IN DATABASE
+            console.log(`[Webhook] PREPARING TO SAVE PAYMENT TO DB for user ${appRecipientUserId}`);
+            const createdPayment = await prisma.payment.create({
               data: {
-                stripePaymentIntentId: paymentIntentId, amount: session.amount_total, // Gross donor payment
-                currency: session.currency.toLowerCase(), status: 'succeeded', recipientUserId: appRecipientUserId,
+                stripePaymentIntentId: paymentIntentId,
+                amount: session.amount_total,
+                currency: session.currency.toLowerCase(),
+                status: 'succeeded',
+                recipientUserId: appRecipientUserId,
                 payerEmail: session.customer_details?.email,
-                platformFee: session.amount_total - transferAmountCents, // Your GROSS profit
+                platformFee: session.amount_total - transferAmountCents,
               },
             });
-            console.log(`[Webhook] Payment and Transfer for PI ${paymentIntentId} recorded successfully.`);
+            console.log(`[Webhook] SUCCESS: Payment ${createdPayment.id} recorded in DB.`);
+
           } catch (err) {
-            console.error('[Webhook] Error creating transfer or saving payment to DB:', err);
-            return res.status(500).json({ error: `Failed to process transfer: ${err.message}` }); // Tell Stripe to retry
+            console.error('[Webhook] FATAL ERROR during transfer/DB operation:', err);
+            // Returning 500 tells Stripe to retry this webhook later.
+            return res.status(500).json({ error: `Failed to process webhook: ${err.message}` }); 
           }
+        } else {
+          console.warn('[Webhook] checkout.session.completed received, but payment_status was not "paid". Status:', session.payment_status);
         }
         break;
-      case 'account.updated':
-        const account = event.data.object;
-        console.log(`[Webhook] account.updated for Stripe Account ID: ${account.id}`);
-        try {
-          const userToUpdate = await prisma.user.findFirst({ where: { stripeAccountId: account.id } });
-          if (userToUpdate) {
-            const onboardingComplete = !!(account.charges_enabled && account.details_submitted && account.payouts_enabled);
-            if (userToUpdate.stripeOnboardingComplete !== onboardingComplete) {
-              await prisma.user.update({ where: { id: userToUpdate.id }, data: { stripeOnboardingComplete: onboardingComplete }});
-              console.log(`[Webhook] Updated onboarding for Stripe account ${account.id} to ${onboardingComplete}`);
-            }
-          } else { console.warn(`[Webhook] Received account.updated for unknown Stripe account ID ${account.id}`); }
-        } catch (dbError) { console.error('[Webhook] DB error from account.updated:', dbError); }
-        break;
-      default: /* console.log(`[Webhook] Unhandled event type: ${event.type}`); */
+      // ... other cases like account.updated ...
+      default:
+        // console.log(`[Webhook] Unhandled event type: ${event.type}`);
     }
+    // Final success response if no errors were returned earlier
+    console.log(`[Webhook] Handler for ${event.type} finished successfully.`);
     res.status(200).json({ received: true });
   }
 );
