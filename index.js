@@ -43,7 +43,7 @@ const PORT = process.env.PORT || 3001;
 app.use(cors(corsOptions));
 
 
-// --- Import Other Routers (stripeRoutes will be imported after webhook setup) ---
+// --- Import Other Routers ---
 const userRoutes = require('./routes/users');
 const linkRoutes = require('./routes/links');
 const publicProfileRoutes = require('./routes/publicProfile');
@@ -113,7 +113,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                             recipientUserId: appRecipientUserId,
                             payerEmail: session.customer_details?.email,
                             platformFee: platformFeeCalculated,
-                            amountToCreator: intendedAmountForCreator, // Amount that went to the creator
+                            netAmountToRecipient: intendedAmountForCreator, // <--- CORRECTED: Using existing schema field
                         },
                     });
                     console.log(`[Webhook] Payment record created for PI ${paymentIntentId}. Amount to creator: ${intendedAmountForCreator} cents.`);
