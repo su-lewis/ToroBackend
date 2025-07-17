@@ -2,35 +2,23 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const prisma = require('./lib/prisma'); // Assuming backend/lib/prisma.js exports the Prisma client
+const prisma = require('./lib/prisma');
 
 const app = express();
-const PORT = process.env.PORT || 3001; // Render.com provides process.env.PORT
+const PORT = process.env.PORT || 3001;
 
 // --- CORS Configuration ---
 const frontendUrlFromEnv = process.env.FRONTEND_URL;
-
 if (!frontendUrlFromEnv) {
-    console.warn(
-        "--------------------------------------------------------------------------\n" +
-        "WARNING: FRONTEND_URL environment variable is NOT SET in backend/.env. \n" +
-        "CORS will default to allow 'http://localhost:3000' only.\n" +
-        "This WILL cause CORS errors if your frontend is deployed elsewhere.\n" +
-        "--------------------------------------------------------------------------"
-    );
+    console.warn("WARNING: FRONTEND_URL env var not set. Defaulting to http://localhost:3000 for CORS.");
 }
-const allowedOrigins = [
-    frontendUrlFromEnv || 'http://localhost:3000'
-].filter(Boolean);
-
+const allowedOrigins = [frontendUrlFromEnv || 'http://localhost:3000'].filter(Boolean);
 const corsOptions = {
   origin: function (origin, callback) {
-    // console.log(`[CORS] Incoming request from Origin: ${origin}`);
-    // console.log(`[CORS] Allowed Origins configured: ${allowedOrigins.join(', ')}`);
     if (!origin || allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
-      console.error(`[CORS] Origin ${origin} is NOT ALLOWED.`);
+      console.error(`CORS Error: Origin ${origin} is NOT ALLOWED.`);
       callback(new Error(`Origin [${origin}] not allowed by CORS policy`));
     }
   },
@@ -40,12 +28,12 @@ const corsOptions = {
   optionsSuccessStatus: 204 
 };
 
-// Apply CORS middleware globally and FIRST.
+// Apply CORS globally and FIRST.
 app.use(cors(corsOptions));
 
-
-// --- Import Routers ---
-const stripeRoutes = require('./routes/stripe');
+// --- Import Routers and Handlers ---
+// Destructure the exports from stripe.js
+const { stripeRouter, stripeWebhookHandler } = require('./routes/stripe'); 
 const userRoutes = require('./routes/users');
 const linkRoutes = require('./routes/links');
 const publicProfileRoutes = require('./routes/publicProfile');
@@ -54,20 +42,19 @@ const { authMiddleware } = require('./middleware/auth');
 
 // --- MIDDLEWARE & ROUTER ORDERING ---
 
-// 1. Mount the Stripe router BEFORE the global JSON parser.
-// The '/api/stripe/webhook' route inside stripeRoutes has its own 'express.raw()' body parser.
-// This route-specific parser will run for the webhook path.
-app.use('/api/stripe', stripeRoutes);
+// 1. Define the Stripe Webhook route FIRST. It has its own raw body parser.
+// This ensures that incoming webhook requests are not parsed as JSON by global middleware.
+app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), stripeWebhookHandler);
 
 
-// 2. Apply the global JSON parser.
-// This will apply to all subsequent routes that need it, AND it will also apply
-// to routes in '/api/stripe' that DON'T have their own body parser (like /create-checkout-session),
-// which is exactly the behavior we want.
+// 2. Now, apply the global JSON parser for all other requests.
 app.use(express.json());
 
 
-// 3. Mount remaining routers
+// 3. Mount all other routers that expect JSON bodies.
+// The /api/stripe router here will handle all routes defined in stripeRouter
+// (like /create-checkout-session), and they will correctly use the global JSON parser.
+app.use('/api/stripe', stripeRouter); 
 app.use('/api/public', publicProfileRoutes);
 app.use('/api/users', userRoutes);
 
@@ -80,6 +67,7 @@ app.use('/api/links', authMiddleware, (req, res, next) => {
   }
   next();
 }, linkRoutes);
+
 
 // Simple health check endpoint
 app.get('/api', (req, res) => {
@@ -96,9 +84,7 @@ app.use((err, req, res, next) => {
   console.error("Error Stack:", err.stack);
   console.error("--- End Unhandled Express Error ---");
 
-  if (res.headersSent) {
-    return next(err);
-  }
+  if (res.headersSent) { return next(err); }
   
   if (err.message && err.message.includes("not allowed by CORS")) {
     return res.status(403).json({ error: "CORS_POLICY_VIOLATION", message: err.message });
