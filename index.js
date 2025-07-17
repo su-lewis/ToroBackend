@@ -2,7 +2,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const prisma = require('./lib/prisma'); // Assumes backend/lib/prisma.js exports the Prisma client
+const prisma = require('./lib/prisma'); // Assuming backend/lib/prisma.js exports the Prisma client
 
 const app = express();
 const PORT = process.env.PORT || 3001; // Render.com provides process.env.PORT
@@ -43,10 +43,6 @@ const corsOptions = {
 // Apply CORS middleware globally and FIRST.
 app.use(cors(corsOptions));
 
-// --- Body Parsers ---
-// Global JSON parser for request bodies. Placed after CORS but before route handlers.
-app.use(express.json());
-
 
 // --- Import Routers ---
 const stripeRoutes = require('./routes/stripe');
@@ -56,8 +52,22 @@ const publicProfileRoutes = require('./routes/publicProfile');
 const { authMiddleware } = require('./middleware/auth');
 
 
-// --- Mount Routers ---
+// --- MIDDLEWARE & ROUTER ORDERING ---
+
+// 1. Mount the Stripe router BEFORE the global JSON parser.
+// The '/api/stripe/webhook' route inside stripeRoutes has its own 'express.raw()' body parser.
+// This route-specific parser will run for the webhook path.
 app.use('/api/stripe', stripeRoutes);
+
+
+// 2. Apply the global JSON parser.
+// This will apply to all subsequent routes that need it, AND it will also apply
+// to routes in '/api/stripe' that DON'T have their own body parser (like /create-checkout-session),
+// which is exactly the behavior we want.
+app.use(express.json());
+
+
+// 3. Mount remaining routers
 app.use('/api/public', publicProfileRoutes);
 app.use('/api/users', userRoutes);
 
@@ -71,7 +81,7 @@ app.use('/api/links', authMiddleware, (req, res, next) => {
   next();
 }, linkRoutes);
 
-// Health check endpoint
+// Simple health check endpoint
 app.get('/api', (req, res) => {
   res.status(200).json({ status: 'healthy', message: 'Link Bio API is running!' });
 });
@@ -86,7 +96,9 @@ app.use((err, req, res, next) => {
   console.error("Error Stack:", err.stack);
   console.error("--- End Unhandled Express Error ---");
 
-  if (res.headersSent) { return next(err); }
+  if (res.headersSent) {
+    return next(err);
+  }
   
   if (err.message && err.message.includes("not allowed by CORS")) {
     return res.status(403).json({ error: "CORS_POLICY_VIOLATION", message: err.message });
@@ -104,6 +116,6 @@ app.listen(PORT, () => {
   console.log(`Backend server running. Listening on port ${PORT}`);
   console.log(`CORS configured. Allowed origins: [${allowedOrigins.join(', ')}]`);
   if (!frontendUrlFromEnv) {
-    console.warn("Reminder: FRONTEND_URL env var is not set; using fallback for CORS.");
+    console.warn("Reminder: FRONTEND_URL env var is not set; using fallback for CORS. This should be set in production.");
   }
 });
