@@ -1,11 +1,10 @@
 // backend/routes/stripe.js
 
 const express = require('express');
-const router = express.Router();
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const router = express.Router(); // This is the Express router instance
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY); // Stripe instance for this module
 const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
-const axios = require('axios'); // <-- IMPORTANT: Ensure axios is installed in your backend: npm install axios
 
 // Environment variable checks for this router
 if (!process.env.STRIPE_SECRET_KEY) {
@@ -16,29 +15,6 @@ if (!process.env.FRONTEND_URL) {
 }
 
 console.log("[Stripe Router] File loaded and router instance created for non-webhook routes.");
-
-// --- Helper function to get country code from IP ---
-async function getCountryCodeFromIp(ip) {
-    // For local testing, req.ip might be localhost or private IP.
-    // In production (e.g., on Render), req.ip will usually be the client's public IP.
-    if (!ip || ip === '::1' || ip === '127.0.0.1' || ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.16.')) {
-        console.warn(`[IP Geolocation] Localhost or private IP (${ip}) detected. Defaulting country to 'US' for testing.`);
-        return 'US'; // Default for local development/testing
-    }
-    try {
-        // Using ip-api.com. Check their terms of service for commercial use and rate limits.
-        const response = await axios.get(`http://ip-api.com/json/${ip}?fields=countryCode`);
-        if (response.data && response.data.countryCode) {
-            console.log(`[IP Geolocation] IP ${ip} resolved to country: ${response.data.countryCode}`);
-            return response.data.countryCode;
-        }
-        console.warn(`[IP Geolocation] Failed to get countryCode for IP ${ip}. Response:`, response.data);
-        return null; // Fallback if API doesn't return countryCode
-    } catch (error) {
-        console.error(`[IP Geolocation] Error fetching country for IP ${ip}:`, error.message);
-        return null; // Fallback on error
-    }
-}
 
 // Helper function to map country to common currency
 // You can expand this mapping as needed for more countries/currencies
@@ -74,6 +50,7 @@ const getCurrencyForCountry = (countryCode) => {
             return 'eur';
         // Add more countries and their currencies as your platform expands
         default:
+            // Fallback to USD or throw an error if the country is not supported
             console.warn(`[Stripe Router] No explicit currency mapping for country code: ${countryCode}. Defaulting to USD.`);
             return 'usd';
     }
@@ -97,11 +74,12 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
             return res.status(400).json({ message: 'An email address is required to connect with Stripe.' });
         }
 
-        // --- Automatically determine country from IP address ---
-        let userCountry = await getCountryCodeFromIp(req.ip); // Use req.ip here
-        if (!userCountry) {
-            console.error("[Stripe Connect] Failed to determine user country from IP. Cannot create Stripe account.");
-            return res.status(500).json({ message: 'Could not determine your country to connect Stripe. Please try again.' });
+        // --- NEW: Dynamic Country for Connected Account ---
+        // Expect countryCode from the frontend request body.
+        // You MUST ensure your frontend sends this value.
+        const userCountry = req.body.countryCode; // e.g., 'US', 'CA', 'GB', 'DE'
+        if (!userCountry || typeof userCountry !== 'string' || userCountry.length !== 2) {
+             return res.status(400).json({ message: 'A valid 2-letter country code (e.g., "US") is required to connect with Stripe.' });
         }
 
         const platformBaseUrl = process.env.FRONTEND_URL;
@@ -114,23 +92,25 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
             const userProfileUrlOnPlatform = `${platformBaseUrl}/${appProfile.username}`;
             const platformDisplayName = process.env.PLATFORM_DISPLAY_NAME || 'Our Platform';
             const productDescriptionOnPlatform = `Receiving support and tips via ${platformDisplayName}.`;
-
+            
             const accountParams = {
                 type: 'express',
-                country: userCountry, // <-- DYNAMIC based on IP geolocation
+                country: userCountry, // <-- NOW DYNAMIC based on frontend input
                 email: emailForStripe,
                 business_type: 'individual',
                 business_profile: {
                     url: userProfileUrlOnPlatform,
-                    mcc: '8999', // Professional Services (Stripe's default for general creative/support platforms)
+                    mcc: '8999', // Professional Services
                     product_description: productDescriptionOnPlatform,
                 },
                 capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
             };
-
+            
             const account = await stripe.accounts.create(accountParams);
             stripeAccountId = account.id;
-
+            
+            // It's highly recommended to store the user's country in your User model
+            // if you don't already have it, to avoid fetching from Stripe later.
             await prisma.user.update({
                 where: { id: appUserId },
                 data: { stripeAccountId: stripeAccountId, stripeOnboardingComplete: false },
@@ -148,9 +128,10 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
         res.json({ url: accountLink.url });
     } catch (error) {
         console.error('[/onboard-user] Error:', error.message, error.stack);
+        // Provide more specific error for client if possible
         let errorMessage = 'Error creating Stripe onboarding link';
         if (error.type === 'StripeInvalidRequestError' && error.code === 'country_unsupported') {
-            errorMessage = `Stripe does not support accounts in your detected country. Please contact support.`;
+            errorMessage = `Stripe does not support accounts in the provided country. (${req.body.countryCode})`;
         }
         res.status(500).json({ message: errorMessage, error: error.message });
     }
@@ -183,8 +164,8 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
             chargesEnabled: account.charges_enabled,
             payoutsEnabled: account.payouts_enabled,
             onboardingComplete: onboardingComplete,
-            accountCountry: account.country,
-            defaultCurrency: account.default_currency,
+            accountCountry: account.country, // Return the account's country
+            defaultCurrency: account.default_currency, // Return the account's default currency
         });
     } catch (error) {
         console.error('[/account-status] Error:', error.message, error.stack);
@@ -213,25 +194,28 @@ router.post('/create-checkout-session', async (req, res) => {
             return res.status(400).json({ message: 'This creator is not currently set up to receive payments.' });
         }
 
+        // --- NEW: Retrieve the connected account details to get its country/default currency ---
         const connectedAccount = await stripe.accounts.retrieve(recipientUser.stripeAccountId);
         const recipientCountryCode = connectedAccount.country;
-        const chargeCurrency = getCurrencyForCountry(recipientCountryCode);
+        const chargeCurrency = getCurrencyForCountry(recipientCountryCode); // Determine currency based on recipient's country
 
+        // Sanity check for currency before proceeding
         if (!chargeCurrency) {
             return res.status(500).json({ message: `Server configuration error: Could not determine charge currency for recipient's country (${recipientCountryCode}).` });
         }
 
         const creatorReceivesAmount = parseFloat(amountForCreatorDollars);
-        const platformFeePercentage = 0.15; // Your 15% platform fee
+        const platformFeePercentage = 0.15; // Your 10% platform fee
 
+        // Calculate the gross amount to charge the donor (creator receives X, so donor pays X / (1 - fee_rate))
         const grossAmountDollarsEquivalent = creatorReceivesAmount / (1 - platformFeePercentage);
-
+        
         // Convert to cents (or appropriate smallest currency unit) for Stripe
         const grossAmountInCents = Math.round(grossAmountDollarsEquivalent * 100);
         const creatorReceivesAmountInCents = Math.round(creatorReceivesAmount * 100);
         const platformFeeInCents = grossAmountInCents - creatorReceivesAmountInCents;
 
-        // --- Check against Stripe's currency-specific minimum charge ---
+        // --- NEW: Check against Stripe's currency-specific minimum charge ---
         // These are common minimums. For production, consider using Stripe's API to get exact min.
         let minChargeInCents = 50; // Default for USD, CAD
         if (chargeCurrency === 'gbp') minChargeInCents = 30; // 30 pence
@@ -245,12 +229,12 @@ router.post('/create-checkout-session', async (req, res) => {
         const platformDisplayName = process.env.PLATFORM_DISPLAY_NAME || 'Our Platform';
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
         const productDescription = `Total payment of ${ (grossAmountInCents / 100).toFixed(2) } ${chargeCurrency.toUpperCase()} via ${platformDisplayName}.`;
-
+        
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
             line_items: [{
                 price_data: {
-                    currency: chargeCurrency, // <-- DYNAMIC based on recipient
+                    currency: chargeCurrency, // <-- NOW DYNAMIC based on recipient
                     product_data: { name: productName, description: productDescription },
                     unit_amount: grossAmountInCents
                 },
@@ -276,6 +260,7 @@ router.post('/create-checkout-session', async (req, res) => {
         res.json({ id: session.id });
     } catch (error) {
         console.error('[/create-checkout-session] Error:', error.message, error.stack);
+        // More descriptive error for client
         let errorMessage = 'Error creating payment session';
         if (error.type === 'StripeInvalidRequestError') {
             if (error.code === 'country_unsupported_by_account') {
