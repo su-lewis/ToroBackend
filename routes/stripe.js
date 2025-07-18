@@ -16,45 +16,6 @@ if (!process.env.FRONTEND_URL) {
 
 console.log("[Stripe Router] File loaded and router instance created for non-webhook routes.");
 
-// Helper function to map country to common currency
-// You can expand this mapping as needed for more countries/currencies
-const getCurrencyForCountry = (countryCode) => {
-    switch (countryCode.toUpperCase()) {
-        case 'US': return 'usd';
-        case 'CA': return 'cad';
-        case 'GB': return 'gbp';
-        case 'AU': return 'aud';
-        // European countries that primarily use EUR
-        case 'AT': // Austria
-        case 'BE': // Belgium
-        case 'CY': // Cyprus
-        case 'EE': // Estonia
-        case 'FI': // Finland
-        case 'FR': // France
-        case 'DE': // Germany
-        case 'GR': // Greece
-        case 'IE': // Ireland
-        case 'IT': // Italy
-        case 'LV': // Latvia
-        case 'LT': // Lithuania
-        case 'LU': // Luxembourg
-        case 'MT': // Malta
-        case 'MC': // Monaco
-        case 'NL': // Netherlands
-        case 'PT': // Portugal
-        case 'SM': // San Marino
-        case 'SK': // Slovakia
-        case 'SI': // Slovenia
-        case 'ES': // Spain
-        case 'VA': // Vatican City
-            return 'eur';
-        // Add more countries and their currencies as your platform expands
-        default:
-            // Fallback to USD or throw an error if the country is not supported
-            console.warn(`[Stripe Router] No explicit currency mapping for country code: ${countryCode}. Defaulting to USD.`);
-            return 'usd';
-    }
-};
 
 // 1. Create Stripe Connect Account and Onboarding Link
 router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
@@ -74,13 +35,11 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
             return res.status(400).json({ message: 'An email address is required to connect with Stripe.' });
         }
 
-        // --- NEW: Dynamic Country for Connected Account ---
-        // Expect countryCode from the frontend request body.
-        // You MUST ensure your frontend sends this value.
-        const userCountry = req.body.countryCode; // e.g., 'US', 'CA', 'GB', 'DE'
-        if (!userCountry || typeof userCountry !== 'string' || userCountry.length !== 2) {
-             return res.status(400).json({ message: 'A valid 2-letter country code (e.g., "US") is required to connect with Stripe.' });
-        }
+        // --- REMOVED --- No longer need to get country from the request body
+        // const userCountry = req.body.countryCode; 
+        // if (!userCountry || typeof userCountry !== 'string' || userCountry.length !== 2) {
+        //     return res.status(400).json({ message: 'A valid 2-letter country code (e.g., "US") is required to connect with Stripe.' });
+        // }
 
         const platformBaseUrl = process.env.FRONTEND_URL;
         if (!platformBaseUrl || !platformBaseUrl.startsWith('http')) {
@@ -95,7 +54,8 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
             
             const accountParams = {
                 type: 'express',
-                country: userCountry, // <-- NOW DYNAMIC based on frontend input
+                // --- REMOVED --- Let Stripe's onboarding determine the country
+                // country: userCountry, 
                 email: emailForStripe,
                 business_type: 'individual',
                 business_profile: {
@@ -109,13 +69,11 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
             const account = await stripe.accounts.create(accountParams);
             stripeAccountId = account.id;
             
-            // It's highly recommended to store the user's country in your User model
-            // if you don't already have it, to avoid fetching from Stripe later.
             await prisma.user.update({
                 where: { id: appUserId },
                 data: { stripeAccountId: stripeAccountId, stripeOnboardingComplete: false },
             });
-            console.log(`[/onboard-user] Created Stripe Account ${stripeAccountId} for user ${appUserId} in ${userCountry}.`);
+            console.log(`[/onboard-user] Created Stripe Account ${stripeAccountId} for user ${appUserId}. Country will be set during onboarding.`);
         }
 
         const accountLink = await stripe.accountLinks.create({
@@ -128,12 +86,7 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
         res.json({ url: accountLink.url });
     } catch (error) {
         console.error('[/onboard-user] Error:', error.message, error.stack);
-        // Provide more specific error for client if possible
-        let errorMessage = 'Error creating Stripe onboarding link';
-        if (error.type === 'StripeInvalidRequestError' && error.code === 'country_unsupported') {
-            errorMessage = `Stripe does not support accounts in the provided country. (${req.body.countryCode})`;
-        }
-        res.status(500).json({ message: errorMessage, error: error.message });
+        res.status(500).json({ message: 'Error creating Stripe onboarding link', error: error.message });
     }
 });
 
