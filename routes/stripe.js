@@ -16,6 +16,46 @@ if (!process.env.FRONTEND_URL) {
 
 console.log("[Stripe Router] File loaded and router instance created for non-webhook routes.");
 
+// Helper function to map country to common currency
+// You can expand this mapping as needed for more countries/currencies
+const getCurrencyForCountry = (countryCode) => {
+    switch (countryCode.toUpperCase()) {
+        case 'US': return 'usd';
+        case 'CA': return 'cad';
+        case 'GB': return 'gbp';
+        case 'AU': return 'aud';
+        // European countries that primarily use EUR
+        case 'AT': // Austria
+        case 'BE': // Belgium
+        case 'CY': // Cyprus
+        case 'EE': // Estonia
+        case 'FI': // Finland
+        case 'FR': // France
+        case 'DE': // Germany
+        case 'GR': // Greece
+        case 'IE': // Ireland
+        case 'IT': // Italy
+        case 'LV': // Latvia
+        case 'LT': // Lithuania
+        case 'LU': // Luxembourg
+        case 'MT': // Malta
+        case 'MC': // Monaco
+        case 'NL': // Netherlands
+        case 'PT': // Portugal
+        case 'SM': // San Marino
+        case 'SK': // Slovakia
+        case 'SI': // Slovenia
+        case 'ES': // Spain
+        case 'VA': // Vatican City
+            return 'eur';
+        // Add more countries and their currencies as your platform expands
+        default:
+            // Fallback to USD or throw an error if the country is not supported
+            console.warn(`[Stripe Router] No explicit currency mapping for country code: ${countryCode}. Defaulting to USD.`);
+            return 'usd';
+    }
+};
+
 // 1. Create Stripe Connect Account and Onboarding Link
 router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
     console.log("--- [Stripe Router] POST /connect/onboard-user START ---");
@@ -34,6 +74,14 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
             return res.status(400).json({ message: 'An email address is required to connect with Stripe.' });
         }
 
+        // --- NEW: Dynamic Country for Connected Account ---
+        // Expect countryCode from the frontend request body.
+        // You MUST ensure your frontend sends this value.
+        const userCountry = req.body.countryCode; // e.g., 'US', 'CA', 'GB', 'DE'
+        if (!userCountry || typeof userCountry !== 'string' || userCountry.length !== 2) {
+             return res.status(400).json({ message: 'A valid 2-letter country code (e.g., "US") is required to connect with Stripe.' });
+        }
+
         const platformBaseUrl = process.env.FRONTEND_URL;
         if (!platformBaseUrl || !platformBaseUrl.startsWith('http')) {
             return res.status(500).json({ message: 'Server configuration error: A valid FRONTEND_URL is required.' });
@@ -47,7 +95,7 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
             
             const accountParams = {
                 type: 'express',
-                country: 'US', // Default, consider making this dynamic if needed
+                country: userCountry, // <-- NOW DYNAMIC based on frontend input
                 email: emailForStripe,
                 business_type: 'individual',
                 business_profile: {
@@ -61,11 +109,13 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
             const account = await stripe.accounts.create(accountParams);
             stripeAccountId = account.id;
             
+            // It's highly recommended to store the user's country in your User model
+            // if you don't already have it, to avoid fetching from Stripe later.
             await prisma.user.update({
                 where: { id: appUserId },
                 data: { stripeAccountId: stripeAccountId, stripeOnboardingComplete: false },
             });
-            console.log(`[/onboard-user] Created Stripe Account ${stripeAccountId} for user ${appUserId}.`);
+            console.log(`[/onboard-user] Created Stripe Account ${stripeAccountId} for user ${appUserId} in ${userCountry}.`);
         }
 
         const accountLink = await stripe.accountLinks.create({
@@ -78,7 +128,12 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
         res.json({ url: accountLink.url });
     } catch (error) {
         console.error('[/onboard-user] Error:', error.message, error.stack);
-        res.status(500).json({ message: 'Error creating Stripe onboarding link', error: error.message });
+        // Provide more specific error for client if possible
+        let errorMessage = 'Error creating Stripe onboarding link';
+        if (error.type === 'StripeInvalidRequestError' && error.code === 'country_unsupported') {
+            errorMessage = `Stripe does not support accounts in the provided country. (${req.body.countryCode})`;
+        }
+        res.status(500).json({ message: errorMessage, error: error.message });
     }
 });
 
@@ -108,7 +163,9 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
             detailsSubmitted: account.details_submitted,
             chargesEnabled: account.charges_enabled,
             payoutsEnabled: account.payouts_enabled,
-            onboardingComplete: onboardingComplete
+            onboardingComplete: onboardingComplete,
+            accountCountry: account.country, // Return the account's country
+            defaultCurrency: account.default_currency, // Return the account's default currency
         });
     } catch (error) {
         console.error('[/account-status] Error:', error.message, error.stack);
@@ -125,7 +182,7 @@ router.post('/create-checkout-session', async (req, res) => {
 
     const { amount: amountForCreatorDollars, recipientUsername } = req.body;
     if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < 1.00) {
-        return res.status(400).json({ message: 'Valid amount for creator (min $1.00) and recipient username required.' });
+        return res.status(400).json({ message: 'Valid amount for creator (min $1.00 equivalent) and recipient username required.' });
     }
 
     try {
@@ -137,31 +194,47 @@ router.post('/create-checkout-session', async (req, res) => {
             return res.status(400).json({ message: 'This creator is not currently set up to receive payments.' });
         }
 
+        // --- NEW: Retrieve the connected account details to get its country/default currency ---
+        const connectedAccount = await stripe.accounts.retrieve(recipientUser.stripeAccountId);
+        const recipientCountryCode = connectedAccount.country;
+        const chargeCurrency = getCurrencyForCountry(recipientCountryCode); // Determine currency based on recipient's country
+
+        // Sanity check for currency before proceeding
+        if (!chargeCurrency) {
+            return res.status(500).json({ message: `Server configuration error: Could not determine charge currency for recipient's country (${recipientCountryCode}).` });
+        }
+
         const creatorReceivesAmount = parseFloat(amountForCreatorDollars);
-        const platformFeePercentage = 0.10; // 10% platform fee
+        const platformFeePercentage = 0.10; // Your 10% platform fee
 
         // Calculate the gross amount to charge the donor (creator receives X, so donor pays X / (1 - fee_rate))
-        const grossAmountDollars = creatorReceivesAmount / (1 - platformFeePercentage);
+        const grossAmountDollarsEquivalent = creatorReceivesAmount / (1 - platformFeePercentage);
         
-        // Convert to cents for Stripe
-        const grossAmountInCents = Math.round(grossAmountDollars * 100);
+        // Convert to cents (or appropriate smallest currency unit) for Stripe
+        const grossAmountInCents = Math.round(grossAmountDollarsEquivalent * 100);
         const creatorReceivesAmountInCents = Math.round(creatorReceivesAmount * 100);
         const platformFeeInCents = grossAmountInCents - creatorReceivesAmountInCents;
 
-        if (grossAmountInCents < 50) { // Stripe minimum is typically 50 cents
-            return res.status(400).json({ message: 'Calculated charge amount is too small.' });
+        // --- NEW: Check against Stripe's currency-specific minimum charge ---
+        // These are common minimums. For production, consider using Stripe's API to get exact min.
+        let minChargeInCents = 50; // Default for USD, CAD
+        if (chargeCurrency === 'gbp') minChargeInCents = 30; // 30 pence
+        else if (chargeCurrency === 'eur') minChargeInCents = 30; // 30 euro cents
+        else if (chargeCurrency === 'aud') minChargeInCents = 50; // 50 cents
+
+        if (grossAmountInCents < minChargeInCents) {
+            return res.status(400).json({ message: `Calculated charge amount is too small. Minimum for ${chargeCurrency.toUpperCase()} is ${minChargeInCents / 100}.` });
         }
 
         const platformDisplayName = process.env.PLATFORM_DISPLAY_NAME || 'Our Platform';
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
-        const productDescription = `Total payment of $${grossAmountDollars.toFixed(2)} via ${platformDisplayName}.`;
+        const productDescription = `Total payment of ${ (grossAmountInCents / 100).toFixed(2) } ${chargeCurrency.toUpperCase()} via ${platformDisplayName}.`;
         
-        // Using Direct Charge and Application Fee model here:
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
             line_items: [{
                 price_data: {
-                    currency: 'usd',
+                    currency: chargeCurrency, // <-- NOW DYNAMIC based on recipient
                     product_data: { name: productName, description: productDescription },
                     unit_amount: grossAmountInCents
                 },
@@ -171,10 +244,9 @@ router.post('/create-checkout-session', async (req, res) => {
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${creatorReceivesAmount.toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
             payment_intent_data: {
-                // Application fee goes to your platform account
                 application_fee_amount: platformFeeInCents > 0 ? platformFeeInCents : undefined,
-                // The rest of the charge goes directly to the recipient's connected account
                 transfer_data: { destination: recipientUser.stripeAccountId },
+                on_behalf_of: recipientUser.stripeAccountId, // <-- CRUCIAL FOR CROSS-REGION SETTLEMENT
             },
             metadata: {
                 appRecipientUserId: recipientUser.id,
@@ -182,12 +254,22 @@ router.post('/create-checkout-session', async (req, res) => {
                 platformFeeCalculated: platformFeeInCents.toString(),
                 grossAmountChargedToDonor: grossAmountInCents.toString(),
                 intendedAmountForCreator: creatorReceivesAmountInCents.toString(),
+                paymentCurrency: chargeCurrency, // <-- Add currency to metadata for webhook
             },
         });
         res.json({ id: session.id });
     } catch (error) {
         console.error('[/create-checkout-session] Error:', error.message, error.stack);
-        res.status(500).json({ message: 'Error creating payment session', error: error.message });
+        // More descriptive error for client
+        let errorMessage = 'Error creating payment session';
+        if (error.type === 'StripeInvalidRequestError') {
+            if (error.code === 'country_unsupported_by_account') {
+                errorMessage = 'Payment cannot be processed for the recipient\'s country. Please contact support.';
+            } else if (error.code === 'charge_too_small') {
+                errorMessage = 'The payment amount is too small for the selected currency.';
+            }
+        }
+        res.status(500).json({ message: errorMessage, error: error.message });
     }
 });
 

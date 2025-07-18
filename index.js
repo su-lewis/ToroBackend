@@ -75,7 +75,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
         case 'checkout.session.completed':
             const session = event.data.object;
             if (session.payment_status === 'paid') {
-                console.log('[Webhook] Checkout Session paid. Recording payment.'); // Updated log message
+                console.log('[Webhook] Checkout Session paid. Recording payment.');
                 const metadata = session.metadata;
                 const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
                 
@@ -84,8 +84,9 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                 const platformFeeCalculated = parseInt(metadata?.platformFeeCalculated, 10);
                 const grossAmountChargedToDonor = parseInt(metadata?.grossAmountChargedToDonor, 10);
                 const intendedAmountForCreator = parseInt(metadata?.intendedAmountForCreator, 10);
+                const paymentCurrency = metadata?.paymentCurrency; // <-- NEW: Get currency from metadata
 
-                if (!appRecipientUserId || !paymentIntentId || isNaN(platformFeeCalculated) || isNaN(grossAmountChargedToDonor) || isNaN(intendedAmountForCreator)) {
+                if (!appRecipientUserId || !paymentIntentId || isNaN(platformFeeCalculated) || isNaN(grossAmountChargedToDonor) || isNaN(intendedAmountForCreator) || !paymentCurrency) {
                     console.error('[Webhook] CRITICAL: Essential metadata missing or invalid for payment record. Session ID:', session.id, 'Metadata:', metadata);
                     return res.status(200).json({ received: true, error: "Essential metadata missing/invalid for payment record." });
                 }
@@ -103,20 +104,16 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                     await prisma.payment.create({
                         data: {
                             stripePaymentIntentId: paymentIntentId,
-                            // Optionally, retrieve the chargeId if you need it for your records,
-                            // though it's not strictly necessary for the transfer in this model.
-                            // const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-                            // stripeChargeId: paymentIntent.latest_charge, 
                             amount: grossAmountChargedToDonor, // Total amount charged to donor
-                            currency: session.currency.toLowerCase(),
+                            currency: paymentCurrency.toLowerCase(), // <-- Use dynamic currency from metadata
                             status: 'succeeded',
                             recipientUserId: appRecipientUserId,
                             payerEmail: session.customer_details?.email,
                             platformFee: platformFeeCalculated,
-                            netAmountToRecipient: intendedAmountForCreator, // <--- CORRECTED: Using existing schema field
+                            netAmountToRecipient: intendedAmountForCreator, // Using existing schema field
                         },
                     });
-                    console.log(`[Webhook] Payment record created for PI ${paymentIntentId}. Amount to creator: ${intendedAmountForCreator} cents.`);
+                    console.log(`[Webhook] Payment record created for PI ${paymentIntentId}. Amount to creator: ${intendedAmountForCreator} cents. Currency: ${paymentCurrency}.`);
 
                 } catch (err) {
                     console.error(`[Webhook] FATAL ERROR during DB operation for PI ${paymentIntentId}:`, err.message, err.stack);
@@ -140,11 +137,11 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
             break;
         case 'charge.succeeded': // Good for more detailed logging/auditing
             const charge = event.data.object;
-            console.log(`[Webhook] Charge succeeded: ${charge.id}. Amount: ${charge.amount}. Destination: ${charge.destination || 'N/A'}`);
+            console.log(`[Webhook] Charge succeeded: ${charge.id}. Amount: ${charge.amount}. Currency: ${charge.currency}. Destination: ${charge.destination || 'N/A'}. On Behalf Of: ${charge.on_behalf_of || 'N/A'}`);
             break;
         case 'transfer.succeeded': // Good for more detailed logging/auditing of the direct transfer
             const transfer = event.data.object;
-            console.log(`[Webhook] Transfer succeeded: ${transfer.id}. Amount: ${transfer.amount}. Destination: ${transfer.destination}`);
+            console.log(`[Webhook] Transfer succeeded: ${transfer.id}. Amount: ${transfer.amount}. Currency: ${transfer.currency}. Destination: ${transfer.destination}`);
             break;
         default:
             // console.log(`[Webhook] Unhandled event type ${event.type}`); // Keep this commented or at debug level
@@ -160,7 +157,6 @@ app.use(express.urlencoded({ extended: true })); // Good practice if you expect 
 
 
 // IMPORT THE SIMPLIFIED STRIPE ROUTER *AFTER* GENERAL MIDDLEWARE
-// 'stripeRoutes' will now directly be the router instance exported from the file.
 const stripeRoutes = require('./routes/stripe'); 
 
 // Mount the imported routers
