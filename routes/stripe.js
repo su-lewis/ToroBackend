@@ -1,31 +1,109 @@
 // backend/routes/stripe.js
+
 const express = require('express');
 const router = express.Router();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
+const axios = require('axios'); // <-- IMPORTANT: Ensure axios is installed in your backend: npm install axios
 
-// Helper function to map country to currency (still needed for /create-checkout-session)
-const getCurrencyForCountry = (countryCode) => {
-    const currencyMap = { 'US': 'usd', 'CA': 'cad', 'GB': 'gbp', 'AU': 'aud', 'DE': 'eur', 'FR': 'eur', 'ES': 'eur', 'IT': 'eur', 'IE': 'eur', 'NL': 'eur', 'PT': 'eur' };
-    const currency = currencyMap[countryCode.toUpperCase()];
-    if (!currency) {
-        console.warn(`[Currency Mapper] No explicit currency for country ${countryCode}. Defaulting to USD.`);
-        return 'usd';
+// Environment variable checks for this router
+if (!process.env.STRIPE_SECRET_KEY) {
+    console.error("FATAL BACKEND ERROR: STRIPE_SECRET_KEY is not defined in .env. Stripe routes will fail.");
+}
+if (!process.env.FRONTEND_URL) {
+    console.warn("WARNING: FRONTEND_URL is not defined in .env. Stripe redirects may fail.");
+}
+
+console.log("[Stripe Router] File loaded and router instance created for non-webhook routes.");
+
+// --- Helper function to get country code from IP ---
+async function getCountryCodeFromIp(ip) {
+    // For local testing, req.ip might be localhost or private IP.
+    // In production (e.g., on Render), req.ip will usually be the client's public IP.
+    if (!ip || ip === '::1' || ip === '127.0.0.1' || ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.16.')) {
+        console.warn(`[IP Geolocation] Localhost or private IP (${ip}) detected. Defaulting country to 'US' for testing.`);
+        return 'US'; // Default for local development/testing
     }
-    return currency;
+    try {
+        // Using ip-api.com. Check their terms of service for commercial use and rate limits.
+        const response = await axios.get(`http://ip-api.com/json/${ip}?fields=countryCode`);
+        if (response.data && response.data.countryCode) {
+            console.log(`[IP Geolocation] IP ${ip} resolved to country: ${response.data.countryCode}`);
+            return response.data.countryCode;
+        }
+        console.warn(`[IP Geolocation] Failed to get countryCode for IP ${ip}. Response:`, response.data);
+        return null; // Fallback if API doesn't return countryCode
+    } catch (error) {
+        console.error(`[IP Geolocation] Error fetching country for IP ${ip}:`, error.message);
+        return null; // Fallback on error
+    }
+}
+
+// Helper function to map country to common currency
+// You can expand this mapping as needed for more countries/currencies
+const getCurrencyForCountry = (countryCode) => {
+    switch (countryCode.toUpperCase()) {
+        case 'US': return 'usd';
+        case 'CA': return 'cad';
+        case 'GB': return 'gbp';
+        case 'AU': return 'aud';
+        // European countries that primarily use EUR
+        case 'AT': // Austria
+        case 'BE': // Belgium
+        case 'CY': // Cyprus
+        case 'EE': // Estonia
+        case 'FI': // Finland
+        case 'FR': // France
+        case 'DE': // Germany
+        case 'GR': // Greece
+        case 'IE': // Ireland
+        case 'IT': // Italy
+        case 'LV': // Latvia
+        case 'LT': // Lithuania
+        case 'LU': // Luxembourg
+        case 'MT': // Malta
+        case 'MC': // Monaco
+        case 'NL': // Netherlands
+        case 'PT': // Portugal
+        case 'SM': // San Marino
+        case 'SK': // Slovakia
+        case 'SI': // Slovenia
+        case 'ES': // Spain
+        case 'VA': // Vatican City
+            return 'eur';
+        // Add more countries and their currencies as your platform expands
+        default:
+            console.warn(`[Stripe Router] No explicit currency mapping for country code: ${countryCode}. Defaulting to USD.`);
+            return 'usd';
+    }
 };
 
-// 1. Create Stripe Connect Account and Onboarding Link (NO country prefill)
+// 1. Create Stripe Connect Account and Onboarding Link
 router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
+    console.log("--- [Stripe Router] POST /connect/onboard-user START ---");
     try {
-        if (!req.localUser?.id) return res.status(403).json({ message: 'Application profile setup required first.' });
-        
+        if (!req.localUser || !req.localUser.id) {
+            return res.status(403).json({ message: 'Application profile setup is required before connecting Stripe.' });
+        }
         const appUserId = req.localUser.id;
-        const appProfile = req.localUser;
+        let appProfile = req.localUser;
+
+        if (!appProfile.username) {
+            return res.status(400).json({ message: 'A username is required in your profile to connect with Stripe.' });
+        }
         const emailForStripe = req.user?.email || appProfile?.email;
-        if (!emailForStripe) return res.status(400).json({ message: 'An email address is required.' });
-        
+        if (!emailForStripe) {
+            return res.status(400).json({ message: 'An email address is required to connect with Stripe.' });
+        }
+
+        // --- Automatically determine country from IP address ---
+        let userCountry = await getCountryCodeFromIp(req.ip); // Use req.ip here
+        if (!userCountry) {
+            console.error("[Stripe Connect] Failed to determine user country from IP. Cannot create Stripe account.");
+            return res.status(500).json({ message: 'Could not determine your country to connect Stripe. Please try again.' });
+        }
+
         const platformBaseUrl = process.env.FRONTEND_URL;
         if (!platformBaseUrl || !platformBaseUrl.startsWith('http')) {
             return res.status(500).json({ message: 'Server configuration error: A valid FRONTEND_URL is required.' });
@@ -34,29 +112,30 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
         let stripeAccountId = appProfile.stripeAccountId;
         if (!stripeAccountId) {
             const userProfileUrlOnPlatform = `${platformBaseUrl}/${appProfile.username}`;
-            const productDescriptionOnPlatform = `Receiving tips and support via ${process.env.PLATFORM_DISPLAY_NAME || 'our platform'}.`;
-            
+            const platformDisplayName = process.env.PLATFORM_DISPLAY_NAME || 'Our Platform';
+            const productDescriptionOnPlatform = `Receiving support and tips via ${platformDisplayName}.`;
+
             const accountParams = {
                 type: 'express',
-                // country: IS NOT SET. Stripe will ask the user.
+                country: userCountry, // <-- DYNAMIC based on IP geolocation
                 email: emailForStripe,
-                business_type: 'individual', // This is pre-filled.
+                business_type: 'individual',
                 business_profile: {
                     url: userProfileUrlOnPlatform,
-                    mcc: '5815', // Digital Goods Media
+                    mcc: '8999', // Professional Services (Stripe's default for general creative/support platforms)
                     product_description: productDescriptionOnPlatform,
                 },
                 capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
             };
-            
+
             const account = await stripe.accounts.create(accountParams);
             stripeAccountId = account.id;
-            
+
             await prisma.user.update({
                 where: { id: appUserId },
                 data: { stripeAccountId: stripeAccountId, stripeOnboardingComplete: false },
             });
-            console.log(`[/onboard-user] Created Stripe Account ${stripeAccountId} for user ${appUserId}.`);
+            console.log(`[/onboard-user] Created Stripe Account ${stripeAccountId} for user ${appUserId} in ${userCountry}.`);
         }
 
         const accountLink = await stripe.accountLinks.create({
@@ -69,95 +148,168 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
         res.json({ url: accountLink.url });
     } catch (error) {
         console.error('[/onboard-user] Error:', error.message, error.stack);
-        res.status(500).json({ message: 'Error creating Stripe onboarding link', error: error.message });
+        let errorMessage = 'Error creating Stripe onboarding link';
+        if (error.type === 'StripeInvalidRequestError' && error.code === 'country_unsupported') {
+            errorMessage = `Stripe does not support accounts in your detected country. Please contact support.`;
+        }
+        res.status(500).json({ message: errorMessage, error: error.message });
     }
 });
 
 // 2. Get Stripe Account Status
-// (No changes needed here)
 router.get('/connect/account-status', authMiddleware, async (req, res) => {
+    console.log("[Stripe Router] GET /connect/account-status hit.");
     try {
-        if (!req.localUser?.id) return res.status(403).json({ message: 'User profile not found.' });
+        if (!req.localUser?.id) {
+            return res.status(403).json({ message: 'User profile not found.' });
+        }
         const user = req.localUser;
-        if (!user.stripeAccountId) return res.status(404).json({ message: 'Stripe account not connected.' });
+        if (!user.stripeAccountId) {
+            return res.status(404).json({ message: 'Stripe account not connected for this user.' });
+        }
         const account = await stripe.accounts.retrieve(user.stripeAccountId);
         const onboardingComplete = !!(account.charges_enabled && account.details_submitted && account.payouts_enabled);
+
         if (user.stripeOnboardingComplete !== onboardingComplete) {
-            await prisma.user.update({ where: { id: user.id }, data: { stripeOnboardingComplete }});
+            await prisma.user.update({
+                where: { id: user.id },
+                data: { stripeOnboardingComplete: onboardingComplete }
+            });
+            console.log(`[/account-status] Onboarding status for user ${user.id} updated to ${onboardingComplete}.`);
         }
-        res.json({ onboardingComplete, stripeAccountId: user.stripeAccountId, detailsSubmitted: account.details_submitted, chargesEnabled: account.charges_enabled, payoutsEnabled: account.payouts_enabled, accountCountry: account.country, defaultCurrency: account.default_currency });
+        res.json({
+            stripeAccountId: user.stripeAccountId,
+            detailsSubmitted: account.details_submitted,
+            chargesEnabled: account.charges_enabled,
+            payoutsEnabled: account.payouts_enabled,
+            onboardingComplete: onboardingComplete,
+            accountCountry: account.country,
+            defaultCurrency: account.default_currency,
+        });
     } catch (error) {
         console.error('[/account-status] Error:', error.message, error.stack);
-        res.status(500).json({ message: 'Error fetching Stripe status', error: error.message });
+        res.status(500).json({ message: 'Error fetching Stripe account status', error: error.message });
     }
 });
 
-// 3. Create Stripe Checkout Session
-// (No changes needed here - it already correctly fetches the connected account's country)
+// 3. Create Stripe Checkout Session (using the "donor pays fees" model - Direct Charge & Application Fee)
 router.post('/create-checkout-session', async (req, res) => {
+    console.log("[Stripe Router] POST /create-checkout-session. Body:", req.body);
+    if (!req.body) {
+        return res.status(400).json({ message: 'Request body is missing.' });
+    }
+
+    const { amount: amountForCreatorDollars, recipientUsername } = req.body;
+    if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < 1.00) {
+        return res.status(400).json({ message: 'Valid amount for creator (min $1.00 equivalent) and recipient username required.' });
+    }
+
     try {
-        if (!req.body) return res.status(400).json({ message: 'Request body missing.' });
-        const { amount: amountForCreatorDollars, recipientUsername } = req.body;
-        if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < 1.00) {
-            return res.status(400).json({ message: 'Valid amount for creator (min $1.00 equivalent) and recipient required.' });
-        }
         const recipientUser = await prisma.user.findUnique({
             where: { username: recipientUsername },
             select: { id: true, username: true, displayName: true, stripeAccountId: true, stripeOnboardingComplete: true }
         });
         if (!recipientUser || !recipientUser.stripeAccountId || !recipientUser.stripeOnboardingComplete) {
-            return res.status(400).json({ message: 'This creator is not set up for payments.' });
+            return res.status(400).json({ message: 'This creator is not currently set up to receive payments.' });
         }
+
         const connectedAccount = await stripe.accounts.retrieve(recipientUser.stripeAccountId);
-        const chargeCurrency = connectedAccount.default_currency || getCurrencyForCountry(connectedAccount.country);
-        const creatorReceivesAmount = parseFloat(amountForCreatorDollars);
-        const platformFeePercentage = 0.10;
-        const grossAmountDollarsEquivalent = creatorReceivesAmount / (1 - platformFeePercentage);
-        const grossAmountInCents = Math.round(grossAmountDollarsEquivalent * 100);
-        const platformFeeInCents = grossAmountInCents - Math.round(creatorReceivesAmount * 100);
-        let minChargeInCents = 50; if (chargeCurrency === 'gbp' || chargeCurrency === 'eur') minChargeInCents = 30;
-        if (grossAmountInCents < minChargeInCents) {
-            return res.status(400).json({ message: `Calculated charge amount is too small. Minimum is ${(minChargeInCents/100).toFixed(2)} ${chargeCurrency.toUpperCase()}.` });
+        const recipientCountryCode = connectedAccount.country;
+        const chargeCurrency = getCurrencyForCountry(recipientCountryCode);
+
+        if (!chargeCurrency) {
+            return res.status(500).json({ message: `Server configuration error: Could not determine charge currency for recipient's country (${recipientCountryCode}).` });
         }
+
+        const creatorReceivesAmount = parseFloat(amountForCreatorDollars);
+        const platformFeePercentage = 0.15; // Your 15% platform fee
+
+        const grossAmountDollarsEquivalent = creatorReceivesAmount / (1 - platformFeePercentage);
+
+        // Convert to cents (or appropriate smallest currency unit) for Stripe
+        const grossAmountInCents = Math.round(grossAmountDollarsEquivalent * 100);
+        const creatorReceivesAmountInCents = Math.round(creatorReceivesAmount * 100);
+        const platformFeeInCents = grossAmountInCents - creatorReceivesAmountInCents;
+
+        // --- Check against Stripe's currency-specific minimum charge ---
+        // These are common minimums. For production, consider using Stripe's API to get exact min.
+        let minChargeInCents = 50; // Default for USD, CAD
+        if (chargeCurrency === 'gbp') minChargeInCents = 30; // 30 pence
+        else if (chargeCurrency === 'eur') minChargeInCents = 30; // 30 euro cents
+        else if (chargeCurrency === 'aud') minChargeInCents = 50; // 50 cents
+
+        if (grossAmountInCents < minChargeInCents) {
+            return res.status(400).json({ message: `Calculated charge amount is too small. Minimum for ${chargeCurrency.toUpperCase()} is ${minChargeInCents / 100}.` });
+        }
+
+        const platformDisplayName = process.env.PLATFORM_DISPLAY_NAME || 'Our Platform';
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
+        const productDescription = `Total payment of ${ (grossAmountInCents / 100).toFixed(2) } ${chargeCurrency.toUpperCase()} via ${platformDisplayName}.`;
+
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
-            line_items: [{ price_data: { currency: chargeCurrency, product_data: { name: productName }, unit_amount: grossAmountInCents }, quantity: 1 }],
+            line_items: [{
+                price_data: {
+                    currency: chargeCurrency, // <-- DYNAMIC based on recipient
+                    product_data: { name: productName, description: productDescription },
+                    unit_amount: grossAmountInCents
+                },
+                quantity: 1
+            }],
             mode: 'payment',
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${creatorReceivesAmount.toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
             payment_intent_data: {
                 application_fee_amount: platformFeeInCents > 0 ? platformFeeInCents : undefined,
                 transfer_data: { destination: recipientUser.stripeAccountId },
-                on_behalf_of: recipientUser.stripeAccountId,
+                on_behalf_of: recipientUser.stripeAccountId, // <-- CRUCIAL FOR CROSS-REGION SETTLEMENT
             },
             metadata: {
                 appRecipientUserId: recipientUser.id,
+                appRecipientUsername: recipientUser.username,
+                platformFeeCalculated: platformFeeInCents.toString(),
                 grossAmountChargedToDonor: grossAmountInCents.toString(),
-                intendedAmountForCreator: Math.round(creatorReceivesAmount * 100).toString(),
-                paymentCurrency: chargeCurrency,
+                intendedAmountForCreator: creatorReceivesAmountInCents.toString(),
+                paymentCurrency: chargeCurrency, // <-- Add currency to metadata for webhook
             },
         });
         res.json({ id: session.id });
     } catch (error) {
         console.error('[/create-checkout-session] Error:', error.message, error.stack);
-        res.status(500).json({ message: 'Error creating payment session', error: error.message });
+        let errorMessage = 'Error creating payment session';
+        if (error.type === 'StripeInvalidRequestError') {
+            if (error.code === 'country_unsupported_by_account') {
+                errorMessage = 'Payment cannot be processed for the recipient\'s country. Please contact support.';
+            } else if (error.code === 'charge_too_small') {
+                errorMessage = 'The payment amount is too small for the selected currency.';
+            }
+        }
+        res.status(500).json({ message: errorMessage, error: error.message });
     }
 });
 
+
 // 4. CREATE STRIPE EXPRESS DASHBOARD LOGIN LINK
 router.post('/create-express-dashboard-link', authMiddleware, async (req, res) => {
+    console.log("[Stripe Router] POST /create-express-dashboard-link");
     try {
-        if (!req.localUser?.id) return res.status(403).json({ message: 'User profile not found.' });
-        if (!req.localUser.stripeAccountId || !req.localUser.stripeOnboardingComplete) {
+        if (!req.localUser?.id) {
+            return res.status(403).json({ message: 'User profile not found.' });
+        }
+        const user = req.localUser;
+        if (!user.stripeAccountId || !user.stripeOnboardingComplete) {
             return res.status(400).json({ message: 'Stripe account not fully set up.' });
         }
-        const loginLink = await stripe.accounts.createLoginLink(req.localUser.stripeAccountId);
+        const loginLink = await stripe.accounts.createLoginLink(user.stripeAccountId);
         res.json({ url: loginLink.url });
     } catch (error) {
         console.error('[/create-express-dashboard-link] Error:', error);
+        if (error.type === 'StripeInvalidRequestError') {
+            return res.status(400).json({ message: 'Unable to generate dashboard link for this account type.' });
+        }
         res.status(500).json({ message: 'Error creating dashboard link', error: error.message });
     }
 });
 
+// Export ONLY the router. The webhook handler is now in index.js
 module.exports = router;
