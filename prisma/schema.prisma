@@ -17,8 +17,8 @@ model User {
   displayName              String?
   bio                      String?
   profileImageUrl          String?
-  bannerImageUrl           String?   // Added for banner
-  profileBackgroundColor String?   // Added for background color
+  bannerImageUrl           String?   
+  profileBackgroundColor   String?   @default("#FFFFFF")
 
   // Optional fields you might collect or prefill for Stripe
   country                  String?

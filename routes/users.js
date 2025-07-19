@@ -28,7 +28,8 @@ router.post('/profile', authMiddleware, async (req, res) => {
     displayName, 
     bio, 
     profileImageUrl, // URL from Supabase Storage for avatar
-    bannerImageUrl   // URL from Supabase Storage for banner
+    bannerImageUrl,
+    profileBackgroundColor // Optional background color for profile
   } = req.body; 
   
   if (!req.user || !req.user.id) {
@@ -65,6 +66,7 @@ router.post('/profile', authMiddleware, async (req, res) => {
       email: userEmail,
       profileImageUrl: profileImageUrl || null,
       bannerImageUrl: bannerImageUrl || null,
+      profileBackgroundColor: profileBackgroundColor || '#FFFFFF',
       supabaseAuthId: supabaseAuthId, // Link to Supabase Auth user
     };
     
@@ -76,6 +78,7 @@ router.post('/profile', authMiddleware, async (req, res) => {
         email: userEmail, // Keep email in sync
         profileImageUrl: profileImageUrl, // If null is passed, it will set it to null
         bannerImageUrl: bannerImageUrl,   // If null is passed, it will set it to null
+        profileBackgroundColor: profileBackgroundColor,
     };
 
     const upsertedUser = await prisma.user.upsert({
