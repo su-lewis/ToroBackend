@@ -2,85 +2,93 @@
 const express = require('express');
 const router = express.Router();
 const prisma = require('../lib/prisma');
-// authMiddleware will be applied when this router is mounted in index.js
+// The authMiddleware is applied in index.js, so req.localUser is available and confirmed.
 
-// Create a new link
-router.post('/', async (req, res) => {
-  if (!req.localUser) {
-    return res.status(403).json({ message: "User profile not set up. Cannot create links." });
-  }
-  const { title, url } = req.body;
-  if (!title || !url) {
-    return res.status(400).json({ message: 'Title and URL are required' });
-  }
-  try {
-    const newLink = await prisma.link.create({
-      data: {
-        title,
-        url,
-        userId: req.localUser.id, // localUser comes from authMiddleware
-      },
-    });
-    res.status(201).json(newLink);
-  } catch (error) {
-    res.status(500).json({ message: 'Error creating link', error: error.message });
-  }
-});
-
-// Get all links for the logged-in user
+// GET /api/links - Fetch all links for the authenticated user (Still useful for initial page load)
 router.get('/', async (req, res) => {
-  if (!req.localUser) {
-    return res.status(403).json({ message: "User profile not set up." });
-  }
   try {
     const links = await prisma.link.findMany({
       where: { userId: req.localUser.id },
-      orderBy: { order: 'asc' }, // Or createdAt, etc.
+      orderBy: { order: 'asc' },
     });
     res.json(links);
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching links', error: error.message });
+    console.error('[/api/links GET] Error fetching links:', error);
+    res.status(500).json({ message: 'Failed to fetch links.' });
   }
 });
 
-// Update a link
-router.put('/:linkId', async (req, res) => {
-  if (!req.localUser) {
-    return res.status(403).json({ message: "User profile not set up." });
+// NEW: POST /api/links/bulk-update - Replaces all links for a user with a new set
+router.post('/bulk-update', async (req, res) => {
+  // Expects req.body to be { links: [ { title: '..', url: '..' }, ... ] }
+  const { links } = req.body;
+  
+  if (!Array.isArray(links)) {
+    return res.status(400).json({ message: 'A "links" array is required.' });
   }
-  const { linkId } = req.params;
-  const { title, url, order } = req.body;
-  try {
-    const link = await prisma.link.findUnique({ where: { id: linkId } });
-    if (!link || link.userId !== req.localUser.id) {
-      return res.status(404).json({ message: 'Link not found or unauthorized' });
+
+  const userId = req.localUser.id;
+
+  // Validate all links before proceeding
+  for (const link of links) {
+    if (!link.title || !link.url) {
+      return res.status(400).json({ message: 'All provided links must have a title and a URL.' });
     }
-    const updatedLink = await prisma.link.update({
-      where: { id: linkId },
-      data: { title, url, order },
+    try {
+      new URL(link.url.startsWith('http') ? link.url : `https://${link.url}`);
+    } catch (_) {
+      return res.status(400).json({ message: `Invalid URL found: ${link.url}` });
+    }
+  }
+
+  try {
+    // Use a transaction to ensure atomicity:
+    // 1. Delete all existing links for this user.
+    // 2. Create all the new links from the provided array.
+    const result = await prisma.$transaction(async (tx) => {
+      await tx.link.deleteMany({
+        where: { userId: userId },
+      });
+
+      if (links.length === 0) {
+        return []; // If they're just clearing all links
+      }
+
+      const newLinksData = links.map((link, index) => ({
+        title: link.title,
+        url: link.url,
+        order: index, // Set order based on the array index
+        userId: userId,
+      }));
+
+      await tx.link.createMany({
+        data: newLinksData,
+      });
+
+      // Fetch the newly created links to return them
+      const createdLinks = await tx.link.findMany({
+        where: { userId: userId },
+        orderBy: { order: 'asc' },
+      });
+
+      return createdLinks;
     });
-    res.json(updatedLink);
+
+    res.status(200).json(result);
   } catch (error) {
-    res.status(500).json({ message: 'Error updating link', error: error.message });
+    console.error('[/api/links/bulk-update] Error:', error);
+    res.status(500).json({ message: 'An error occurred while saving your links.' });
   }
 });
 
-// Delete a link
-router.delete('/:linkId', async (req, res) => {
-  if (!req.localUser) {
-    return res.status(403).json({ message: "User profile not set up." });
-  }
-  const { linkId } = req.params;
-  try {
-    const link = await prisma.link.findUnique({ where: { id: linkId } });
-    if (!link || link.userId !== req.localUser.id) {
-      return res.status(404).json({ message: 'Link not found or unauthorized' });
-    }
-    await prisma.link.delete({ where: { id: linkId } });
-    res.status(204).send(); // No content
-  } catch (error) {
-    res.status(500).json({ message: 'Error deleting link', error: error.message });
-  }
-});
+// You can keep or remove the individual POST, PUT, DELETE, and /reorder routes
+// if they are no longer needed by your frontend.
+// For now, let's leave them commented out or remove them to avoid confusion.
+/*
+router.post('/', ...);
+router.put('/:linkId', ...);
+router.delete('/:linkId', ...);
+router.post('/reorder', ...);
+*/
 
 module.exports = router;
