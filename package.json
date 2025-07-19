@@ -3,9 +3,10 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+     "dev": "nodemon index.js",
+    "build": "npx prisma generate", // <-- ADD THIS LINE
+    "start": "npx prisma migrate deploy && node index.js", // This is good for applying migrations
+    "lint": "eslint ."
   },
   "keywords": [],
   "author": "",
