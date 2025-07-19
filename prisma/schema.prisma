@@ -20,6 +20,8 @@ model User {
   bio                      String?
   profileImageUrl          String?   // Existing avatar URL
   bannerImageUrl           String?   // NEW: For banner image URL
+  profileBackgroundColor   String?   // e.g., to store a hex code like '#FFFFFF'
+
 
   stripeAccountId          String?   @unique
   stripeOnboardingComplete Boolean   @default(false)
