@@ -5,31 +5,41 @@ generator client {
 }
 
 datasource db {
-  provider     = "postgresql"
-  url          = env("DATABASE_URL")
-  relationMode = "prisma" // Keep if using Supabase pooler on port 6543, or if you have other reasons.
-                           // Can often be removed if using direct DB connection or pooler on port 5432.
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model User {
   id                       String    @id @default(cuid())
   supabaseAuthId           String    @unique
   username                 String    @unique
-  email                    String?
+  email                    String?   @unique
   displayName              String?
   bio                      String?
-  profileImageUrl          String?   // Existing avatar URL
-  bannerImageUrl           String?   // NEW: For banner image URL
-  profileBackgroundColor   String?   // e.g., to store a hex code like '#FFFFFF'
+  profileImageUrl          String?
+  bannerImageUrl           String?   // Added for banner
+  profileBackgroundColor String?   // Added for background color
 
+  // Optional fields you might collect or prefill for Stripe
+  country                  String?
+  phone                    String?
+  firstName                String?
+  lastName                 String?
+  dobDay                   Int?
+  dobMonth                 Int?
+  dobYear                  Int?
 
+  // Stripe fields
   stripeAccountId          String?   @unique
   stripeOnboardingComplete Boolean   @default(false)
-  
+
+  // Relations
   links                    Link[]
   paymentsReceived         Payment[] @relation("RecipientPayments")
+  
   createdAt                DateTime  @default(now())
   updatedAt                DateTime  @updatedAt
+
   @@index([supabaseAuthId])
   @@index([username])
 }
@@ -38,10 +48,10 @@ model Link {
   id          String   @id @default(cuid())
   title       String
   url         String
-  userId      String   // Foreign key to User
+  userId      String
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  order       Int?     // For custom ordering
-  clicks      Int      @default(0) // Optional click tracking
+  order       Int?
+  clicks      Int      @default(0)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -50,19 +60,14 @@ model Link {
 
 model Payment {
   id                    String    @id @default(cuid())
-  stripePaymentIntentId String    @unique // From Stripe (e.g., pi_xxxx)
-  amount                Int       // In cents
-  currency              String    // e.g., "usd"
-  status                String    // e.g., "succeeded", "paid"
-  recipientUserId       String    // Foreign key to User who received payment
+  stripePaymentIntentId String    @unique
+  amount                Int
+  currency              String
+  status                String
+  recipientUserId       String
   recipient             User      @relation("RecipientPayments", fields: [recipientUserId], references: [id], onDelete: Restrict)
-  
-  // Optional details about the payer
-  payerName             String?
-  payerEmail            String?   // Be mindful of PII
-  
-  platformFee           Int?      // Platform fee taken, in cents
-  netAmountToRecipient  Int?      // amount - platformFee, in cents
-  
+  payerEmail            String?
+  platformFee           Int?
+  netAmountToRecipient  Int?
   createdAt             DateTime  @default(now())
 }
