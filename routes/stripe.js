@@ -77,7 +77,6 @@ router.post('/create-checkout-session', async (req, res) => {
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${creatorReceivesAmount.toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
             payment_intent_data: {
-                application_fee_amount: platformFeeInCents > 0 ? platformFeeInCents : undefined,
                 transfer_data: { 
                     destination: recipientUser.stripeAccountId,
                     // The amount transferred is now explicitly the creator's portion
