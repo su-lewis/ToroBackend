@@ -1,13 +1,13 @@
 // backend/routes/stripe.js
 const express = require('express');
 const router = express.Router();
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY, {
+    apiVersion: '2023-10-16', // Using a fixed API version is good practice
+});
 const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
 
-console.log("[Stripe Router] File loaded and router instance created for non-webhook routes.");
-
-// Helper function to map country to currency (still needed for /create-checkout-session)
+// Helper function to map country to a common currency
 const getCurrencyForCountry = (countryCode) => {
     const currencyMap = { 'US': 'usd', 'CA': 'cad', 'GB': 'gbp', 'AU': 'aud', 'DE': 'eur', 'FR': 'eur', 'ES': 'eur', 'IT': 'eur', 'IE': 'eur', 'NL': 'eur', 'PT': 'eur' };
     const currency = currencyMap[countryCode.toUpperCase()];
@@ -18,11 +18,10 @@ const getCurrencyForCountry = (countryCode) => {
     return currency;
 };
 
-// 1. Create Stripe Connect Account and Onboarding Link (SIMPLIFIED - NO country/phone from frontend)
+// 1. Create Stripe Connect Account and Onboarding Link
 router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
     try {
         if (!req.localUser?.id) return res.status(403).json({ message: 'Application profile setup required first.' });
-        
         const appUserId = req.localUser.id;
         const appProfile = req.localUser;
         const emailForStripe = req.user?.email || appProfile?.email;
@@ -37,15 +36,13 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
         if (!stripeAccountId) {
             const userProfileUrlOnPlatform = `${platformBaseUrl}/${appProfile.username}`;
             const productDescriptionOnPlatform = `Receiving tips and support via ${process.env.PLATFORM_DISPLAY_NAME || 'our platform'}.`;
-            
             const accountParams = {
                 type: 'express',
-                // country: IS REMOVED. Stripe will now ask the user for it.
                 email: emailForStripe,
                 business_type: 'individual',
                 business_profile: {
                     url: userProfileUrlOnPlatform,
-                    mcc: '5815', // Digital Goods Media - a good generic for content creators
+                    mcc: '5815', // Digital Goods Media
                     product_description: productDescriptionOnPlatform,
                 },
                 capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
@@ -58,7 +55,6 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
                 where: { id: appUserId },
                 data: { stripeAccountId: stripeAccountId, stripeOnboardingComplete: false },
             });
-            console.log(`[/onboard-user] Created Stripe Account ${stripeAccountId} for user ${appUserId}.`);
         }
 
         const accountLink = await stripe.accountLinks.create({
@@ -67,7 +63,6 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
             return_url: `${platformBaseUrl}/connect-stripe?status=success`,
             type: 'account_onboarding',
         });
-
         res.json({ url: accountLink.url });
     } catch (error) {
         console.error('[/onboard-user] Error:', error.message, error.stack);
@@ -76,7 +71,6 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
 });
 
 // 2. Get Stripe Account Status
-// (No changes needed - this logic is fine)
 router.get('/connect/account-status', authMiddleware, async (req, res) => {
     try {
         if (!req.localUser?.id) return res.status(403).json({ message: 'User profile not found.' });
@@ -94,8 +88,7 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
     }
 });
 
-// 3. Create Stripe Checkout Session
-// (No changes needed - this logic correctly fetches country from Stripe account)
+// 3. Create Stripe Checkout Session (MODEL: Simple Add-On Fee)
 router.post('/create-checkout-session', async (req, res) => {
     try {
         if (!req.body) return res.status(400).json({ message: 'Request body missing.' });
@@ -112,31 +105,54 @@ router.post('/create-checkout-session', async (req, res) => {
         }
         const connectedAccount = await stripe.accounts.retrieve(recipientUser.stripeAccountId);
         const chargeCurrency = connectedAccount.default_currency || getCurrencyForCountry(connectedAccount.country);
+
+        // --- CALCULATION CHANGE IS HERE ---
         const creatorReceivesAmount = parseFloat(amountForCreatorDollars);
-        const platformFeePercentage = 0.15;
-        const grossAmountDollarsEquivalent = creatorReceivesAmount / (1 - platformFeePercentage);
-        const grossAmountInCents = Math.round(grossAmountDollarsEquivalent * 100);
-        const platformFeeInCents = grossAmountInCents - Math.round(creatorReceivesAmount * 100);
+        const platformFeePercentage = 0.15; // Your 15% platform fee
+
+        // Calculate a simple 15% fee on top of the creator's amount
+        const platformFeeDollars = creatorReceivesAmount * platformFeePercentage;
+        // The total amount the donor will be charged is the simple sum
+        const grossAmountDollars = creatorReceivesAmount + platformFeeDollars;
+        
+        // Convert to cents for Stripe
+        const grossAmountInCents = Math.round(grossAmountDollars * 100);
+        const creatorReceivesAmountInCents = Math.round(creatorReceivesAmount * 100);
+        const platformFeeInCents = grossAmountInCents - creatorReceivesAmountInCents;
+        // --- END CALCULATION CHANGE ---
+
         let minChargeInCents = 50; if (chargeCurrency === 'gbp' || chargeCurrency === 'eur') minChargeInCents = 30;
         if (grossAmountInCents < minChargeInCents) {
-            return res.status(400).json({ message: `Calculated charge amount is too small. Minimum is ${(minChargeInCents/100).toFixed(2)} ${chargeCurrency.toUpperCase()}.` });
+            return res.status(400).json({ message: `Calculated charge amount is too small.` });
         }
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
-            line_items: [{ price_data: { currency: chargeCurrency, product_data: { name: productName }, unit_amount: grossAmountInCents }, quantity: 1 }],
+            line_items: [{
+                price_data: {
+                    currency: chargeCurrency,
+                    product_data: { name: productName },
+                    unit_amount: grossAmountInCents // Charge the donor the new total (e.g., 11500 for a $100 gift)
+                },
+                quantity: 1
+            }],
             mode: 'payment',
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${creatorReceivesAmount.toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
             payment_intent_data: {
                 application_fee_amount: platformFeeInCents > 0 ? platformFeeInCents : undefined,
-                transfer_data: { destination: recipientUser.stripeAccountId },
+                transfer_data: { 
+                    destination: recipientUser.stripeAccountId,
+                    // The amount transferred is now explicitly the creator's amount
+                    amount: creatorReceivesAmountInCents,
+                },
                 on_behalf_of: recipientUser.stripeAccountId,
             },
             metadata: {
                 appRecipientUserId: recipientUser.id,
                 grossAmountChargedToDonor: grossAmountInCents.toString(),
-                intendedAmountForCreator: Math.round(creatorReceivesAmount * 100).toString(),
+                intendedAmountForCreator: creatorReceivesAmountInCents.toString(),
+                platformFeeCalculated: platformFeeInCents.toString(),
                 paymentCurrency: chargeCurrency,
             },
         });
@@ -148,7 +164,6 @@ router.post('/create-checkout-session', async (req, res) => {
 });
 
 // 4. CREATE STRIPE EXPRESS DASHBOARD LOGIN LINK
-// (No changes needed)
 router.post('/create-express-dashboard-link', authMiddleware, async (req, res) => {
     try {
         if (!req.localUser?.id) return res.status(403).json({ message: 'User profile not found.' });
@@ -163,5 +178,4 @@ router.post('/create-express-dashboard-link', authMiddleware, async (req, res) =
     }
 });
 
-// Export ONLY the router. The webhook handler is in index.js
 module.exports = router;
