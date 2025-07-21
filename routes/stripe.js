@@ -73,18 +73,16 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
 });
 
 
-// 3. Create Stripe Checkout Session (MODEL: Simple Add-On Fee with MINIMUM AMOUNT CHECK)
+// 3. Create Stripe Checkout Session (MODEL: Simple Add-On Fee, Implicit Fee for Stripe)
 router.post('/create-checkout-session', async (req, res) => {
     try {
-        if (!req.body) return res.status(400).json({ message: 'Request body missing.' });
+        if (!req.body) return res.status(400).json({ message: 'Request body is missing.' });
         const { amount: amountForCreatorDollars, recipientUsername } = req.body;
         
-        // --- UPDATED VALIDATION ---
         const MINIMUM_SEND_AMOUNT = 5.00;
         if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT) {
             return res.status(400).json({ message: `Valid amount for creator (min $${MINIMUM_SEND_AMOUNT.toFixed(2)} equivalent) and recipient username required.` });
         }
-        // --- END UPDATED VALIDATION ---
 
         const recipientUser = await prisma.user.findUnique({
             where: { username: recipientUsername },
@@ -93,6 +91,7 @@ router.post('/create-checkout-session', async (req, res) => {
         if (!recipientUser || !recipientUser.stripeAccountId || !recipientUser.stripeOnboardingComplete) {
             return res.status(400).json({ message: 'This creator is not set up for payments.' });
         }
+
         const connectedAccount = await stripe.accounts.retrieve(recipientUser.stripeAccountId);
         const chargeCurrency = connectedAccount.default_currency || getCurrencyForCountry(connectedAccount.country);
 
@@ -109,7 +108,9 @@ router.post('/create-checkout-session', async (req, res) => {
         if (grossAmountInCents < minChargeInCents) {
             return res.status(400).json({ message: `Calculated charge amount is too small.` });
         }
+        
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
+        
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
             line_items: [{
@@ -124,14 +125,20 @@ router.post('/create-checkout-session', async (req, res) => {
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${creatorReceivesAmount.toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
             payment_intent_data: {
-                application_fee_amount: platformFeeInCents > 0 ? platformFeeInCents : undefined, // This was missing in the code you pasted, adding it back
+                // --- THIS IS THE FIX ---
+                // REMOVE application_fee_amount when transfer_data.amount is specified.
+                // application_fee_amount: platformFeeInCents > 0 ? platformFeeInCents : undefined,
+                
                 transfer_data: { 
                     destination: recipientUser.stripeAccountId,
+                    // By setting this amount, Stripe will automatically calculate
+                    // the platform fee as (unit_amount - this_amount).
                     amount: creatorReceivesAmountInCents,
                 },
                 on_behalf_of: recipientUser.stripeAccountId,
             },
             metadata: {
+                // Metadata remains the same and is very useful for your webhook
                 appRecipientUserId: recipientUser.id,
                 grossAmountChargedToDonor: grossAmountInCents.toString(),
                 intendedAmountForCreator: creatorReceivesAmountInCents.toString(),
