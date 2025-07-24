@@ -73,17 +73,15 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
 });
 
 
-// 3. Create Stripe Checkout Session (UPDATED to accept donorName)
+// 3. Create Stripe Checkout Session (MODEL: Simple Add-On Fee, Implicit Fee for Stripe)
 router.post('/create-checkout-session', async (req, res) => {
     try {
         if (!req.body) return res.status(400).json({ message: 'Request body is missing.' });
-        
-        // --- CHANGE: Destructure the new optional donorName field ---
-        const { amount: amountForCreatorDollars, recipientUsername, donorName } = req.body;
+        const { amount: amountForCreatorDollars, recipientUsername } = req.body;
         
         const MINIMUM_SEND_AMOUNT = 5.00;
         if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT) {
-            return res.status(400).json({ message: `Valid amount for creator (min $${MINIMUM_SEND_AMOUNT.toFixed(2)}) and recipient required.` });
+            return res.status(400).json({ message: `Valid amount for creator (min $${MINIMUM_SEND_AMOUNT.toFixed(2)} equivalent) and recipient username required.` });
         }
 
         const recipientUser = await prisma.user.findUnique({
@@ -104,6 +102,7 @@ router.post('/create-checkout-session', async (req, res) => {
         
         const grossAmountInCents = Math.round(grossAmountDollars * 100);
         const creatorReceivesAmountInCents = Math.round(creatorReceivesAmount * 100);
+        const platformFeeInCents = grossAmountInCents - creatorReceivesAmountInCents;
 
         let minChargeInCents = 50; if (chargeCurrency === 'gbp' || chargeCurrency === 'eur') minChargeInCents = 30;
         if (grossAmountInCents < minChargeInCents) {
@@ -115,27 +114,36 @@ router.post('/create-checkout-session', async (req, res) => {
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
             line_items: [{
-                price_data: { currency: chargeCurrency, product_data: { name: productName }, unit_amount: grossAmountInCents },
+                price_data: {
+                    currency: chargeCurrency,
+                    product_data: { name: productName },
+                    unit_amount: grossAmountInCents
+                },
                 quantity: 1
             }],
             mode: 'payment',
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${creatorReceivesAmount.toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
             payment_intent_data: {
+                // --- THIS IS THE FIX ---
+                // REMOVE application_fee_amount when transfer_data.amount is specified.
+                // application_fee_amount: platformFeeInCents > 0 ? platformFeeInCents : undefined,
+                
                 transfer_data: { 
                     destination: recipientUser.stripeAccountId,
+                    // By setting this amount, Stripe will automatically calculate
+                    // the platform fee as (unit_amount - this_amount).
                     amount: creatorReceivesAmountInCents,
                 },
                 on_behalf_of: recipientUser.stripeAccountId,
             },
             metadata: {
+                // Metadata remains the same and is very useful for your webhook
                 appRecipientUserId: recipientUser.id,
                 grossAmountChargedToDonor: grossAmountInCents.toString(),
                 intendedAmountForCreator: creatorReceivesAmountInCents.toString(),
-                platformFeeCalculated: (grossAmountInCents - creatorReceivesAmountInCents).toString(),
+                platformFeeCalculated: platformFeeInCents.toString(),
                 paymentCurrency: chargeCurrency,
-                // --- CHANGE: Add donorName to metadata ---
-                donorName: donorName ? donorName.substring(0, 100) : 'Anonymous', // Default to Anonymous if blank
             },
         });
         res.json({ id: session.id });

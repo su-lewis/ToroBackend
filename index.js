@@ -43,44 +43,46 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
         return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
+    console.log(`[Webhook] Event received and verified: ${event.type}, ID: ${event.id}`);
     switch (event.type) {
         case 'checkout.session.completed':
             const session = event.data.object;
             if (session.payment_status === 'paid') {
+                console.log('[Webhook] Checkout Session paid. Recording payment (Direct Charge model).');
                 const metadata = session.metadata;
                 const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
                 const appRecipientUserId = metadata?.appRecipientUserId;
+                const intendedAmountForCreator = parseInt(metadata?.intendedAmountForCreator, 10);
+                const grossAmountChargedToDonor = parseInt(metadata?.grossAmountChargedToDonor, 10);
+                const paymentCurrency = metadata?.paymentCurrency || session.currency;
 
-                if (!paymentIntentId || !appRecipientUserId) {
-                    return res.status(200).json({ received: true, error: "Essential metadata missing." });
+                if (!paymentIntentId || !appRecipientUserId || isNaN(intendedAmountForCreator) || isNaN(grossAmountChargedToDonor)) {
+                    console.error('[Webhook] CRITICAL: Essential metadata missing for payment record. Session ID:', session.id);
+                    return res.status(200).json({ received: true, error: "Metadata missing." });
                 }
 
                 try {
                     const existingPayment = await prisma.payment.findUnique({ where: { stripePaymentIntentId: paymentIntentId } });
                     if (existingPayment) {
+                        console.log(`[Webhook] Payment ${paymentIntentId} already recorded.`);
                         return res.status(200).json({ received: true, message: "Already recorded" });
                     }
-                    
-                    const grossAmountCharged = parseInt(metadata.grossAmountChargedToDonor, 10);
-                    const intendedForCreator = parseInt(metadata.intendedAmountForCreator, 10);
                     
                     await prisma.payment.create({
                         data: {
                             stripePaymentIntentId: paymentIntentId,
-                            amount: grossAmountCharged,
-                            currency: (metadata.paymentCurrency || 'usd').toLowerCase(),
+                            amount: grossAmountChargedToDonor,
+                            currency: paymentCurrency.toLowerCase(),
                             status: 'succeeded',
                             recipientUserId: appRecipientUserId,
                             payerEmail: session.customer_details?.email,
-                            platformFee: grossAmountCharged - intendedForCreator, 
-                            netAmountToRecipient: intendedForCreator,
-                            // --- CHANGE: Save donorName from metadata ---
-                            payerName: metadata.donorName || 'Anonymous',
+                            platformFee: grossAmountChargedToDonor - intendedAmountForCreator, 
+                            netAmountToRecipient: intendedAmountForCreator,
                         },
                     });
                     console.log(`[Webhook] Payment record created for PI ${paymentIntentId}.`);
                 } catch (err) {
-                    console.error(`[Webhook] FATAL ERROR during DB op for PI ${paymentIntentId}:`, err.message);
+                    console.error(`[Webhook] FATAL ERROR during DB op for PI ${paymentIntentId}:`, err.message, err.stack);
                     return res.status(500).json({ error: `Webhook processing failed: ${err.message}` });
                 }
             }
@@ -98,6 +100,8 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                 }
             } catch (dbError) { console.error('[Webhook] DB error from account.updated:', dbError); }
             break;
+        default:
+            // console.log(`[Webhook] Unhandled event type ${event.type}`);
     }
     res.status(200).json({ received: true });
 });
@@ -105,13 +109,13 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
 // --- GENERAL MIDDLEWARE AND OTHER ROUTERS ---
 app.use(express.json());
 
-const stripeRoutes = require('./routes/stripe');
+const stripeRoutes = require('./routes/stripe'); // Import the router from stripe.js
 const userRoutes = require('./routes/users');
 const linkRoutes = require('./routes/links');
 const publicProfileRoutes = require('./routes/publicProfile');
 const { authMiddleware } = require('./middleware/auth');
 
-app.use('/api/stripe', stripeRoutes);
+app.use('/api/stripe', stripeRoutes); // Mount the router for non-webhook stripe routes
 app.use('/api/public', publicProfileRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/links', authMiddleware, (req, res, next) => {
