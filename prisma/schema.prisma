@@ -67,6 +67,7 @@ model Payment {
   recipientUserId       String
   recipient             User      @relation("RecipientPayments", fields: [recipientUserId], references: [id], onDelete: Restrict)
   payerEmail            String?
+  payerName             String?
   platformFee           Int?
   netAmountToRecipient  Int?
   createdAt             DateTime  @default(now())
