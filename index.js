@@ -113,11 +113,13 @@ const stripeRoutes = require('./routes/stripe'); // Import the router from strip
 const userRoutes = require('./routes/users');
 const linkRoutes = require('./routes/links');
 const publicProfileRoutes = require('./routes/publicProfile');
+const paymentRoutes = require('./routes/payments');
 const { authMiddleware } = require('./middleware/auth');
 
 app.use('/api/stripe', stripeRoutes); // Mount the router for non-webhook stripe routes
 app.use('/api/public', publicProfileRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/payments', authMiddleware, paymentRoutes);
 app.use('/api/links', authMiddleware, (req, res, next) => {
     if (!req.localUser) {
         return res.status(403).json({ message: "Profile setup required." });
