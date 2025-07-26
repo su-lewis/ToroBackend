@@ -78,6 +78,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                             payerEmail: session.customer_details?.email,
                             platformFee: grossAmountChargedToDonor - intendedAmountForCreator, 
                             netAmountToRecipient: intendedAmountForCreator,
+                            payerName: metadata.donorName || 'Anonymous',
                         },
                     });
                     console.log(`[Webhook] Payment record created for PI ${paymentIntentId}.`);

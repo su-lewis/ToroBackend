@@ -77,7 +77,7 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
 router.post('/create-checkout-session', async (req, res) => {
     try {
         if (!req.body) return res.status(400).json({ message: 'Request body is missing.' });
-        const { amount: amountForCreatorDollars, recipientUsername } = req.body;
+        const { amount: amountForCreatorDollars, recipientUsername, donorName } = req.body;
         
         const MINIMUM_SEND_AMOUNT = 5.00;
         if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT) {
@@ -144,6 +144,7 @@ router.post('/create-checkout-session', async (req, res) => {
                 intendedAmountForCreator: creatorReceivesAmountInCents.toString(),
                 platformFeeCalculated: platformFeeInCents.toString(),
                 paymentCurrency: chargeCurrency,
+                donorName: donorName ? donorName.substring(0, 100) : 'Anonymous',
             },
         });
         res.json({ id: session.id });
