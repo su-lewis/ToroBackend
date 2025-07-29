@@ -112,7 +112,7 @@ router.post('/create-checkout-session', async (req, res) => {
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
         
         const session = await stripe.checkout.sessions.create({
-            payment_method_types: ['card'],
+            payment_method_types: ['card', 'klarna', 'link'],
             line_items: [{
                 price_data: {
                     currency: chargeCurrency,
@@ -137,6 +137,7 @@ router.post('/create-checkout-session', async (req, res) => {
                 },
                 on_behalf_of: recipientUser.stripeAccountId,
             },
+            billing_address_collection: 'required',
             metadata: {
                 // Metadata remains the same and is very useful for your webhook
                 appRecipientUserId: recipientUser.id,
