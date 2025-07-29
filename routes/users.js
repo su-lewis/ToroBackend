@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const prisma = require('../lib/prisma'); // Using the separated Prisma client
 const { authMiddleware } = require('../middleware/auth');
+const { createClient } = require('@supabase/supabase-js'); // Needed for re-authentication
 
 // GET current logged-in user's application profile
 // Fetches all relevant fields including avatar and banner URLs
@@ -97,6 +98,92 @@ router.post('/profile', authMiddleware, async (req, res) => {
     }
     res.status(500).json({ message: "An error occurred while saving the profile.", error: error.message });
   }
+});
+
+router.post('/update-password', authMiddleware, async (req, res) => {
+    const { currentPassword, newPassword } = req.body;
+    const supabaseUser = req.user; // From authMiddleware
+
+    if (!currentPassword || !newPassword) {
+        return res.status(400).json({ message: 'Current and new passwords are required.' });
+    }
+    if (newPassword.length < 6) {
+        return res.status(400).json({ message: 'New password must be at least 6 characters long.' });
+    }
+
+    try {
+        // Step 1: Verify the current password by trying to sign in with it.
+        // We create a temporary client for this, as the admin client can't check passwords.
+        const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+        const { error: signInError } = await supabase.auth.signInWithPassword({
+            email: supabaseUser.email,
+            password: currentPassword,
+        });
+
+        if (signInError) {
+            // This error means the current password was incorrect.
+            return res.status(401).json({ message: 'Incorrect current password.' });
+        }
+
+        // Step 2: If the current password is correct, update the user with the admin client.
+        const supabaseAdmin = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+        const { error: updateUserError } = await supabaseAdmin.auth.admin.updateUserById(
+            supabaseUser.id,
+            { password: newPassword }
+        );
+
+        if (updateUserError) {
+            // This could happen for various reasons, e.g., Supabase issue.
+            throw updateUserError;
+        }
+        
+        res.status(200).json({ message: 'Password updated successfully.' });
+
+    } catch (error) {
+        console.error(`[/users/update-password] Error for user ${supabaseUser.id}:`, error);
+        res.status(500).json({ message: error.message || 'An error occurred while updating your password.' });
+    }
+});
+
+
+// --- NEW ROUTE: Securely Update User Email ---
+// Follows the same pattern: verify password, then update with admin client.
+router.post('/update-email', authMiddleware, async (req, res) => {
+    const { currentPassword, newEmail } = req.body;
+    const supabaseUser = req.user;
+
+    if (!currentPassword || !newEmail) {
+        return res.status(400).json({ message: 'Current password and new email are required.' });
+    }
+
+    try {
+        const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+        const { error: signInError } = await supabase.auth.signInWithPassword({
+            email: supabaseUser.email,
+            password: currentPassword,
+        });
+        if (signInError) {
+            return res.status(401).json({ message: 'Incorrect password.' });
+        }
+        
+        const supabaseAdmin = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+        const { error: updateUserError } = await supabaseAdmin.auth.admin.updateUserById(
+            supabaseUser.id,
+            { email: newEmail }
+        );
+        if (updateUserError) {
+            // E.g., if email is already in use by another user
+            if (updateUserError.message.includes('unique constraint')) {
+                return res.status(409).json({ message: 'This email address is already in use.' });
+            }
+            throw updateUserError;
+        }
+
+        res.status(200).json({ message: 'Confirmation links sent to both old and new email addresses. Please verify to complete the change.' });
+    } catch (error) {
+        console.error(`[/users/update-email] Error for user ${supabaseUser.id}:`, error);
+        res.status(500).json({ message: error.message || 'An error occurred while updating your email.' });
+    }
 });
 
 module.exports = router;
