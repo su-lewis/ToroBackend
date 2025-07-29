@@ -169,4 +169,98 @@ router.post('/create-express-dashboard-link', authMiddleware, async (req, res) =
     }
 });
 
+// 5. TRIGGER A MANUAL INSTANT PAYOUT ("Payout Now" button)
+router.post('/payouts/instant', authMiddleware, async (req, res) => {
+    try {
+        if (!req.localUser?.stripeAccountId || !req.localUser.stripeOnboardingComplete) {
+            return res.status(400).json({ message: "Stripe account not fully set up for payouts." });
+        }
+        const user = req.localUser;
+        const stripeAccountId = user.stripeAccountId;
+
+        // Get the available balance for the connected account
+        const balance = await stripe.balance.retrieve({
+            stripeAccount: stripeAccountId,
+        });
+
+        // Find their main currency balance
+        const connectedAccount = await stripe.accounts.retrieve(stripeAccountId);
+        const defaultCurrency = connectedAccount.default_currency;
+        const availableBalance = balance.available.find(b => b.currency === defaultCurrency);
+
+        if (!availableBalance || availableBalance.amount <= 0) {
+            return res.status(400).json({ message: "No available balance for an instant payout." });
+        }
+
+        console.log(`[Payout Now] Initiating instant payout of ${availableBalance.amount} ${defaultCurrency.toUpperCase()} for ${stripeAccountId}`);
+
+        // Create the instant payout on behalf of the connected account
+        const payout = await stripe.payouts.create({
+            amount: availableBalance.amount,
+            currency: defaultCurrency,
+            method: 'instant',
+        }, {
+            stripeAccount: stripeAccountId, // This header makes the API call on behalf of the connected account
+        });
+
+        res.json({ success: true, message: `Instant payout of ${formatCurrency(payout.amount, payout.currency)} initiated.`, payoutId: payout.id });
+
+    } catch (error) {
+        console.error("[/payouts/instant] Error:", error);
+        res.status(500).json({ message: error.message || "Failed to initiate instant payout. Ensure an eligible debit card is on file with Stripe." });
+    }
+});
+
+// 6. TOGGLE AUTOMATIC PAYOUT SETTINGS
+router.post('/payouts/toggle-auto', authMiddleware, async (req, res) => {
+    try {
+        if (!req.localUser?.stripeAccountId || !req.localUser.stripeOnboardingComplete) {
+            return res.status(400).json({ message: "Stripe account not fully set up." });
+        }
+        const { autoPayoutsEnabled } = req.body; // Expect a boolean: true or false
+        if (typeof autoPayoutsEnabled !== 'boolean') {
+            return res.status(400).json({ message: "A boolean value for 'autoPayoutsEnabled' is required." });
+        }
+
+        const user = req.localUser;
+        const stripeAccountId = user.stripeAccountId;
+
+        console.log(`[Toggle Auto Payouts] Setting auto payouts for ${stripeAccountId} to ${autoPayoutsEnabled}`);
+
+        // Update the account's payout schedule on Stripe
+        await stripe.accounts.update(stripeAccountId, {
+            settings: {
+                payouts: {
+                    schedule: {
+                        // If enabled, set to daily automatic. If disabled, set to manual.
+                        interval: autoPayoutsEnabled ? 'daily' : 'manual',
+                        // You could also offer 'weekly' or 'monthly' options
+                    }
+                }
+            }
+        });
+
+        // Update the preference in your own database
+        const updatedUser = await prisma.user.update({
+            where: { id: user.id },
+            data: { stripeAutoPayoutsEnabled: autoPayoutsEnabled },
+        });
+
+        res.json({ 
+            success: true, 
+            message: `Automatic payouts have been ${autoPayoutsEnabled ? 'enabled' : 'disabled'}.`,
+            stripeAutoPayoutsEnabled: updatedUser.stripeAutoPayoutsEnabled
+        });
+
+    } catch (error) {
+        console.error("[/payouts/toggle-auto] Error:", error);
+        res.status(500).json({ message: error.message || "Failed to update payout settings." });
+    }
+});
+
+// Helper function (can be placed at the bottom or in a separate file)
+const formatCurrency = (cents, currency = 'USD') => {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: currency.toUpperCase() }).format(cents / 100);
+};
+
 module.exports = router;

@@ -33,6 +33,9 @@ model User {
   stripeAccountId          String?   @unique
   stripeOnboardingComplete Boolean   @default(false)
 
+  // Store the user's preference for automatic instant payouts
+  stripeAutoPayoutsEnabled Boolean   @default(false)
+
   // Relations
   links                    Link[]
   paymentsReceived         Payment[] @relation("RecipientPayments")
