@@ -258,6 +258,25 @@ router.post('/payouts/toggle-auto', authMiddleware, async (req, res) => {
     }
 });
 
+// 7. GET STRIPE CONNECT ACCOUNT BALANCE
+router.get('/balance', authMiddleware, async (req, res) => {
+    try {
+        if (!req.localUser?.stripeAccountId || !req.localUser.stripeOnboardingComplete) {
+            return res.status(404).json({ message: "Stripe account not fully set up." });
+        }
+        const stripeAccountId = req.localUser.stripeAccountId;
+
+        const balance = await stripe.balance.retrieve({
+            stripeAccount: stripeAccountId,
+        });
+
+        res.json(balance);
+    } catch (error) {
+        console.error('[/stripe/balance] Error fetching Stripe balance:', error);
+        res.status(500).json({ message: 'Error fetching Stripe balance', error: error.message });
+    }
+});
+
 // Helper function (can be placed at the bottom or in a separate file)
 const formatCurrency = (cents, currency = 'USD') => {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency: currency.toUpperCase() }).format(cents / 100);
