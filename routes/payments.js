@@ -5,6 +5,28 @@ const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
 const { subDays, startOfDay } = require('date-fns'); // npm install date-fns
 
+// Helper function to abstract the database query for payment stats.
+// This avoids repeating the same aggregation logic.
+const getPaymentStats = async (userId, currency, dateFilter = {}) => {
+  const stats = await prisma.payment.aggregate({
+    where: {
+      recipientUserId: userId,
+      status: 'succeeded',
+      currency: currency.toLowerCase(),
+      ...dateFilter, // Spread the date filter if it exists
+    },
+    _sum: {
+      netAmountToRecipient: true,
+    },
+    _count: {
+      id: true,
+    },
+  });
+  return {
+    revenueCents: stats._sum.netAmountToRecipient || 0,
+    giftCount: stats._count.id || 0,
+  };
+};
 // GET /api/payments/stats - Fetch payment stats for the authenticated user
 // Now accepts query parameters: ?period=7d¤cy=usd
 router.get('/stats', authMiddleware, async (req, res) => {
@@ -27,44 +49,19 @@ router.get('/stats', authMiddleware, async (req, res) => {
   const startDate = (periodMap[period] || periodMap['30d'])();
 
   try {
-    // 1. Calculate stats for the requested period, filtered by currency
-    const periodStats = await prisma.payment.aggregate({
-      where: {
-        recipientUserId: userId,
-        status: 'succeeded',
-        currency: currency.toLowerCase(), // Filter by the user's primary currency
-        createdAt: {
-          gte: startDate, // gte = greater than or equal to
-        },
-      },
-      _sum: {
-        netAmountToRecipient: true, // Sum of what the creator received (in cents)
-      },
-      _count: {
-        id: true, // Count of successful payments
-      },
-    });
-
-    // 2. Calculate All-Time stats, also filtered by the same currency
-    const allTimeStats = await prisma.payment.aggregate({
-      where: { recipientUserId: userId, status: 'succeeded', currency: currency.toLowerCase() },
-      _sum: {
-        netAmountToRecipient: true,
-      },
-      _count: {
-        id: true,
-      },
-    });
+    // Use the helper function to get both sets of stats
+    const [periodStatsData, allTimeStatsData] = await Promise.all([
+      getPaymentStats(userId, currency, { createdAt: { gte: startDate } }),
+      getPaymentStats(userId, currency),
+    ]);
 
     const stats = {
       allTime: {
-        revenueCents: allTimeStats._sum.netAmountToRecipient || 0,
-        giftCount: allTimeStats._count.id || 0,
+        ...allTimeStatsData,
         currency: currency,
       },
       period: {
-        revenueCents: periodStats._sum.netAmountToRecipient || 0,
-        giftCount: periodStats._count.id || 0,
+        ...periodStatsData,
         currency: currency,
         timeframe: period, // e.g., '7d', '30d', 'today'
       },

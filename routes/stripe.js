@@ -7,6 +7,10 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY, {
 const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
 
+// --- Constants for payment logic ---
+const PLATFORM_FEE_PERCENTAGE = 0.15; // 15%
+const MINIMUM_SEND_AMOUNT_DOLLARS = 5.00;
+
 // Helper function to map country to a common currency
 const getCurrencyForCountry = (countryCode) => {
     const currencyMap = { 'US': 'usd', 'CA': 'cad', 'GB': 'gbp', 'AU': 'aud', 'DE': 'eur', 'FR': 'eur', 'ES': 'eur', 'IT': 'eur', 'IE': 'eur', 'NL': 'eur', 'PT': 'eur' };
@@ -78,10 +82,9 @@ router.post('/create-checkout-session', async (req, res) => {
     try {
         if (!req.body) return res.status(400).json({ message: 'Request body is missing.' });
         const { amount: amountForCreatorDollars, recipientUsername, donorName } = req.body;
-        
-        const MINIMUM_SEND_AMOUNT = 5.00;
-        if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT) {
-            return res.status(400).json({ message: `Valid amount for creator (min $${MINIMUM_SEND_AMOUNT.toFixed(2)} equivalent) and recipient username required.` });
+
+        if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT_DOLLARS) {
+            return res.status(400).json({ message: `Valid amount for creator (min $${MINIMUM_SEND_AMOUNT_DOLLARS.toFixed(2)} equivalent) and recipient username required.` });
         }
 
         const recipientUser = await prisma.user.findUnique({
@@ -95,10 +98,10 @@ router.post('/create-checkout-session', async (req, res) => {
         const connectedAccount = await stripe.accounts.retrieve(recipientUser.stripeAccountId);
         const chargeCurrency = connectedAccount.default_currency || getCurrencyForCountry(connectedAccount.country);
 
-        const creatorReceivesAmount = parseFloat(amountForCreatorDollars);
-        const platformFeePercentage = 0.15;
-        const platformFeeDollars = creatorReceivesAmount * platformFeePercentage;
-        const grossAmountDollars = creatorReceivesAmount + platformFeeDollars;
+        // Convert to cents immediately to avoid floating-point inaccuracies.
+        const creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
+        const platformFeeInCents = Math.round(creatorReceivesAmountInCents * PLATFORM_FEE_PERCENTAGE);
+        const grossAmountInCents = creatorReceivesAmountInCents + platformFeeInCents;
         
         const MINIMUM_CHARGE_CENTS = {
             'usd': 50,
@@ -107,10 +110,6 @@ router.post('/create-checkout-session', async (req, res) => {
             'gbp': 50,
             'eur': 50,
         };
-
-        const grossAmountInCents = Math.round(grossAmountDollars * 100);
-        const creatorReceivesAmountInCents = Math.round(creatorReceivesAmount * 100);
-        const platformFeeInCents = grossAmountInCents - creatorReceivesAmountInCents;
 
         const minChargeInCents = MINIMUM_CHARGE_CENTS[chargeCurrency] || 50; // Default to 50 for unlisted currencies
         if (grossAmountInCents < minChargeInCents) {
@@ -130,7 +129,7 @@ router.post('/create-checkout-session', async (req, res) => {
                 quantity: 1
             }],
             mode: 'payment',
-            success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${creatorReceivesAmount.toFixed(2)}`,
+            success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${(creatorReceivesAmountInCents / 100).toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
             payment_intent_data: {
                 // By using `transfer_data.amount`, Stripe automatically calculates
