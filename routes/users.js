@@ -162,6 +162,7 @@ router.post('/update-email', authMiddleware, async (req, res) => {
         );
 
         if (updateUserError) {
+            console.error('Supabase admin email update error:', updateUserError); // Explicitly log the error from Supabase
             if (updateUserError.message.includes('unique constraint') || updateUserError.message.includes('already registered')) {
                 return res.status(409).json({ message: 'This email address is already in use.' });
             }
@@ -169,7 +170,7 @@ router.post('/update-email', authMiddleware, async (req, res) => {
         }
 
         // The success message should reflect that confirmation is required.
-        res.status(200).json({ message: 'Confirmation links have been sent to both your old and new email addresses. Please check your new email to finalize the change.' });
+        res.status(200).json({ message: `A confirmation link has been sent to ${newEmail}. Please check your inbox to finalize the change.` });
     } catch (error) {
         console.error(`[/users/update-email] Error for user ${supabaseUser.id}:`, error);
         res.status(500).json({ message: error.message || 'An error occurred while updating your email.' });
