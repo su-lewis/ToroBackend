@@ -156,7 +156,7 @@ router.post('/update-email', authMiddleware, async (req, res) => {
         // This sends a confirmation link to the user's CURRENT email address.
         const supabaseAdmin = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
         const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
-a            type: 'email_change_current',
+            type: 'email_change_current',
             email: supabaseUser.email,
             newEmail: newEmail,
             // Optional: You can specify a redirect URL after the change is confirmed.
