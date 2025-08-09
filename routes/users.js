@@ -152,25 +152,27 @@ router.post('/update-email', authMiddleware, async (req, res) => {
             return res.status(401).json({ message: 'Incorrect password.' });
         }
         
-        // Step 2: Use the ADMIN client to update the email.
-        // The standard behavior for updating an email via the API (even for admins)
-        // is to send confirmation emails for security. Supabase handles this.
+        // Step 2: Generate a secure email change link.
+        // This sends a confirmation link to the user's CURRENT email address.
         const supabaseAdmin = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-        const { error: updateUserError } = await supabaseAdmin.auth.admin.updateUserById(
-            supabaseUser.id,
-            { email: newEmail }
-        );
+        const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+            type: 'email_change',
+            email: supabaseUser.email,
+            newEmail: newEmail,
+            // Optional: You can specify a redirect URL after the change is confirmed.
+            // options: { redirectTo: `${process.env.FRONTEND_URL}/dashboard/account-settings?email_updated=true` }
+        });
 
-        if (updateUserError) {
-            console.error('Supabase admin email update error:', updateUserError); // Explicitly log the error from Supabase
-            if (updateUserError.message.includes('unique constraint') || updateUserError.message.includes('already registered')) {
+        if (linkError) {
+            console.error('Supabase admin generateLink error:', linkError);
+            if (linkError.message.includes('unique constraint') || linkError.message.includes('already registered')) {
                 return res.status(409).json({ message: 'This email address is already in use.' });
             }
-            throw updateUserError;
+            throw linkError;
         }
 
-        // The success message should reflect that confirmation is required.
-        res.status(200).json({ message: `A confirmation link has been sent to ${newEmail}. Please check your inbox to finalize the change.` });
+        // The success message should reflect that confirmation is required at the CURRENT email.
+        res.status(200).json({ message: `A confirmation link has been sent to your current email address (${supabaseUser.email}) to approve the change.` });
     } catch (error) {
         console.error(`[/users/update-email] Error for user ${supabaseUser.id}:`, error);
         res.status(500).json({ message: error.message || 'An error occurred while updating your email.' });
