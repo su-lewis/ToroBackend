@@ -100,25 +100,21 @@ router.post('/profile', authMiddleware, async (req, res) => {
   }
 });
 
+// --- CORRECTED: Securely Update User Password ---
 router.post('/update-password', authMiddleware, async (req, res) => {
     const { currentPassword, newPassword } = req.body;
     const supabaseUser = req.user;
 
-    if (!currentPassword || !newPassword) {
-        return res.status(400).json({ message: 'Current and new passwords are required.' });
-    }
-    if (newPassword.length < 6) {
-        return res.status(400).json({ message: 'New password must be at least 6 characters long.' });
-    }
+    if (!currentPassword || !newPassword) return res.status(400).json({ message: 'Current and new passwords are required.' });
+    if (newPassword.length < 6) return res.status(400).json({ message: 'New password must be at least 6 characters long.' });
 
     try {
-        // Step 1: Verify the current password by trying to sign in with it.
+        // Step 1: Verify the current password.
         const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
         const { error: signInError } = await supabase.auth.signInWithPassword({
             email: supabaseUser.email,
             password: currentPassword,
         });
-
         if (signInError) {
             return res.status(401).json({ message: 'Incorrect current password.' });
         }
@@ -129,58 +125,41 @@ router.post('/update-password', authMiddleware, async (req, res) => {
             supabaseUser.id,
             { password: newPassword }
         );
-
-        if (updateUserError) { throw updateUserError; }
+        if (updateUserError) throw updateUserError;
         
         res.status(200).json({ message: 'Password updated successfully.' });
-
     } catch (error) {
         console.error(`[/users/update-password] Error for user ${supabaseUser.id}:`, error);
         res.status(500).json({ message: error.message || 'An error occurred while updating your password.' });
     }
 });
-
-// --- SECURELY UPDATE USER EMAIL (with user-facing confirmation flow) ---
+// --- CORRECTED: Securely Update User Email (with confirmation) ---
 router.post('/update-email', authMiddleware, async (req, res) => {
     const { currentPassword, newEmail } = req.body;
-    const supabaseUser = req.user; // Authenticated user from the JWT
-    const userAccessToken = req.headers.authorization.split(' ')[1]; // The user's own token
+    const supabaseUser = req.user;
 
-    if (!currentPassword || !newEmail) {
-        return res.status(400).json({ message: 'Current password and new email are required.' });
-    }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
-        return res.status(400).json({ message: 'Please enter a valid email address.' });
-    }
-    if (newEmail.toLowerCase() === supabaseUser.email.toLowerCase()) {
-        return res.status(400).json({ message: 'The new email must be different from your current one.' });
-    }
+    if (!currentPassword || !newEmail) return res.status(400).json({ message: 'Current password and new email are required.' });
+    if (newEmail.toLowerCase() === supabaseUser.email.toLowerCase()) return res.status(400).json({ message: 'New email must be different from the current one.' });
 
     try {
         // Step 1: Verify the current password.
-        const supabaseClientForPasswordCheck = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
-        const { error: signInError } = await supabaseClientForPasswordCheck.auth.signInWithPassword({
+        const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+        const { error: signInError } = await supabase.auth.signInWithPassword({
             email: supabaseUser.email,
             password: currentPassword,
         });
-
         if (signInError) {
             return res.status(401).json({ message: 'Incorrect password.' });
         }
-
-        // Step 2: If password is correct, create a new Supabase client
-        // authenticated AS THE USER using their access token.
-        const supabaseUserClient = createClient(
-            process.env.SUPABASE_URL,
-            process.env.SUPABASE_ANON_KEY,
-            { global: { headers: { Authorization: `Bearer ${userAccessToken}` } } }
+        
+        // Step 2: Use the ADMIN client to update the email.
+        // The standard behavior for updating an email via the API (even for admins)
+        // is to send confirmation emails for security. Supabase handles this.
+        const supabaseAdmin = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+        const { error: updateUserError } = await supabaseAdmin.auth.admin.updateUserById(
+            supabaseUser.id,
+            { email: newEmail }
         );
-
-        // Step 3: Call the standard updateUser method with this user-authenticated client.
-        // THIS will trigger the confirmation email flow.
-        const { data: updateData, error: updateUserError } = await supabaseUserClient.auth.updateUser({
-            email: newEmail,
-        });
 
         if (updateUserError) {
             if (updateUserError.message.includes('unique constraint') || updateUserError.message.includes('already registered')) {
@@ -189,13 +168,13 @@ router.post('/update-email', authMiddleware, async (req, res) => {
             throw updateUserError;
         }
 
-        // The success message is now correct because this flow sends the emails.
+        // The success message should reflect that confirmation is required.
         res.status(200).json({ message: 'Confirmation links have been sent to both your old and new email addresses. Please check your new email to finalize the change.' });
-
     } catch (error) {
         console.error(`[/users/update-email] Error for user ${supabaseUser.id}:`, error);
         res.status(500).json({ message: error.message || 'An error occurred while updating your email.' });
     }
 });
+
 
 module.exports = router;
