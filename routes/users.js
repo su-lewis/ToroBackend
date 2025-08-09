@@ -59,33 +59,22 @@ router.post('/profile', authMiddleware, async (req, res) => {
       return res.status(409).json({ message: "Username is already taken by another user." });
     }
 
-    // Data for creating a new user profile
-    const dataForCreate = {
+    // Define a single data object for the profile information.
+    // Prisma's `update` will ignore any fields that are `undefined`.
+    const profileData = {
       username: trimmedUsername,
-      displayName: displayName || null,
-      bio: bio || null,
+      displayName: displayName,
+      bio: bio,
       email: userEmail,
-      profileImageUrl: profileImageUrl || null,
-      bannerImageUrl: bannerImageUrl || null,
-      profileBackgroundColor: profileBackgroundColor || '#FFFFFF',
-      supabaseAuthId: supabaseAuthId, // Link to Supabase Auth user
-    };
-    
-    // Data for updating an existing user profile
-    const dataForUpdate = {
-        username: trimmedUsername,
-        displayName: displayName || null,
-        bio: bio || null,
-        email: userEmail, // Keep email in sync
-        profileImageUrl: profileImageUrl, // If null is passed, it will set it to null
-        bannerImageUrl: bannerImageUrl,   // If null is passed, it will set it to null
-        profileBackgroundColor: profileBackgroundColor,
+      profileImageUrl: profileImageUrl,
+      bannerImageUrl: bannerImageUrl,
+      profileBackgroundColor: profileBackgroundColor,
     };
 
     const upsertedUser = await prisma.user.upsert({
       where: { supabaseAuthId: supabaseAuthId }, // Find user by their Supabase Auth ID
-      update: dataForUpdate,
-      create: dataForCreate,
+      update: profileData,
+      create: { ...profileData, supabaseAuthId: supabaseAuthId },
     });
 
     console.log(`POST /api/users/profile: Profile successfully upserted for Supabase user ${supabaseAuthId}`);
@@ -164,11 +153,10 @@ router.post('/update-email', authMiddleware, async (req, res) => {
         });
 
         if (linkError) {
-            console.error('Supabase admin generateLink error:', linkError);
             if (linkError.message.includes('unique constraint') || linkError.message.includes('already registered')) {
                 return res.status(409).json({ message: 'This email address is already in use.' });
             }
-            throw linkError;
+            throw linkError; // Let the main catch block handle logging and the 500 response
         }
 
         // The success message should reflect that confirmation is required at the CURRENT email.
@@ -178,6 +166,5 @@ router.post('/update-email', authMiddleware, async (req, res) => {
         res.status(500).json({ message: error.message || 'An error occurred while updating your email.' });
     }
 });
-
 
 module.exports = router;

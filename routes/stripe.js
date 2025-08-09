@@ -104,9 +104,17 @@ router.post('/create-checkout-session', async (req, res) => {
         const creatorReceivesAmountInCents = Math.round(creatorReceivesAmount * 100);
         const platformFeeInCents = grossAmountInCents - creatorReceivesAmountInCents;
 
-        let minChargeInCents = 50; if (chargeCurrency === 'gbp' || chargeCurrency === 'eur') minChargeInCents = 30;
+        // Use a map for clearer minimum charge definitions per currency
+        const MINIMUM_CHARGE_CENTS = {
+            'usd': 50,
+            'cad': 50,
+            'aud': 50,
+            'gbp': 50,
+            'eur': 50,
+        };
+        const minChargeInCents = MINIMUM_CHARGE_CENTS[chargeCurrency] || 50; // Default to 50 for unlisted currencies
         if (grossAmountInCents < minChargeInCents) {
-            return res.status(400).json({ message: `Calculated charge amount is too small.` });
+            return res.status(400).json({ message: `The total charge amount is below the minimum required.` });
         }
         
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
