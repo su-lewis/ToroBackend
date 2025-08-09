@@ -140,40 +140,58 @@ router.post('/update-password', authMiddleware, async (req, res) => {
     }
 });
 
-
-// --- NEW ROUTE: Securely Update User Email ---
-// Follows the same pattern: verify password, then update with admin client.
+// --- SECURELY UPDATE USER EMAIL (with user-facing confirmation flow) ---
 router.post('/update-email', authMiddleware, async (req, res) => {
     const { currentPassword, newEmail } = req.body;
-    const supabaseUser = req.user;
+    const supabaseUser = req.user; // Authenticated user from the JWT
+    const userAccessToken = req.headers.authorization.split(' ')[1]; // The user's own token
 
     if (!currentPassword || !newEmail) {
         return res.status(400).json({ message: 'Current password and new email are required.' });
     }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
+        return res.status(400).json({ message: 'Please enter a valid email address.' });
+    }
+    if (newEmail.toLowerCase() === supabaseUser.email.toLowerCase()) {
+        return res.status(400).json({ message: 'The new email must be different from your current one.' });
+    }
 
     try {
-        const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
-        const { error: signInError } = await supabase.auth.signInWithPassword({
+        // Step 1: Verify the current password.
+        const supabaseClientForPasswordCheck = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+        const { error: signInError } = await supabaseClientForPasswordCheck.auth.signInWithPassword({
             email: supabaseUser.email,
             password: currentPassword,
         });
+
         if (signInError) {
             return res.status(401).json({ message: 'Incorrect password.' });
         }
-        
-        const supabaseAdmin = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-        const { error: updateUserError } = await supabaseAdmin.auth.admin.updateUserById(
-            supabaseUser.id,
-            { email: newEmail }
+
+        // Step 2: If password is correct, create a new Supabase client
+        // authenticated AS THE USER using their access token.
+        const supabaseUserClient = createClient(
+            process.env.SUPABASE_URL,
+            process.env.SUPABASE_ANON_KEY,
+            { global: { headers: { Authorization: `Bearer ${userAccessToken}` } } }
         );
+
+        // Step 3: Call the standard updateUser method with this user-authenticated client.
+        // THIS will trigger the confirmation email flow.
+        const { data: updateData, error: updateUserError } = await supabaseUserClient.auth.updateUser({
+            email: newEmail,
+        });
+
         if (updateUserError) {
-            if (updateUserError.message.includes('unique constraint')) {
+            if (updateUserError.message.includes('unique constraint') || updateUserError.message.includes('already registered')) {
                 return res.status(409).json({ message: 'This email address is already in use.' });
             }
             throw updateUserError;
         }
 
-        res.status(200).json({ message: 'Confirmation links sent to both old and new email addresses. Please verify to complete the change.' });
+        // The success message is now correct because this flow sends the emails.
+        res.status(200).json({ message: 'Confirmation links have been sent to both your old and new email addresses. Please check your new email to finalize the change.' });
+
     } catch (error) {
         console.error(`[/users/update-email] Error for user ${supabaseUser.id}:`, error);
         res.status(500).json({ message: error.message || 'An error occurred while updating your email.' });
