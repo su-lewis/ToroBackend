@@ -100,11 +100,6 @@ router.post('/create-checkout-session', async (req, res) => {
         const platformFeeDollars = creatorReceivesAmount * platformFeePercentage;
         const grossAmountDollars = creatorReceivesAmount + platformFeeDollars;
         
-        const grossAmountInCents = Math.round(grossAmountDollars * 100);
-        const creatorReceivesAmountInCents = Math.round(creatorReceivesAmount * 100);
-        const platformFeeInCents = grossAmountInCents - creatorReceivesAmountInCents;
-
-        // Use a map for clearer minimum charge definitions per currency
         const MINIMUM_CHARGE_CENTS = {
             'usd': 50,
             'cad': 50,
@@ -112,6 +107,11 @@ router.post('/create-checkout-session', async (req, res) => {
             'gbp': 50,
             'eur': 50,
         };
+
+        const grossAmountInCents = Math.round(grossAmountDollars * 100);
+        const creatorReceivesAmountInCents = Math.round(creatorReceivesAmount * 100);
+        const platformFeeInCents = grossAmountInCents - creatorReceivesAmountInCents;
+
         const minChargeInCents = MINIMUM_CHARGE_CENTS[chargeCurrency] || 50; // Default to 50 for unlisted currencies
         if (grossAmountInCents < minChargeInCents) {
             return res.status(400).json({ message: `The total charge amount is below the minimum required.` });
@@ -133,17 +133,15 @@ router.post('/create-checkout-session', async (req, res) => {
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${creatorReceivesAmount.toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
             payment_intent_data: {
-                // --- THIS IS THE FIX ---
-                // REMOVE application_fee_amount when transfer_data.amount is specified.
-                // application_fee_amount: platformFeeInCents > 0 ? platformFeeInCents : undefined,
-                
+                // By using `transfer_data.amount`, Stripe automatically calculates
+                // the platform fee as (total charge - amount to creator).
+                // This is the modern and recommended approach for Connect payments.
+                // It replaces the need for `application_fee_amount` and `on_behalf_of`.
                 transfer_data: { 
                     destination: recipientUser.stripeAccountId,
-                    // By setting this amount, Stripe will automatically calculate
-                    // the platform fee as (unit_amount - this_amount).
                     amount: creatorReceivesAmountInCents,
                 },
-                on_behalf_of: recipientUser.stripeAccountId,
+                // `on_behalf_of` is not used with destination charges.
             },
             billing_address_collection: 'required',
             metadata: {

@@ -15,22 +15,16 @@ router.get('/stats', authMiddleware, async (req, res) => {
   const period = req.query.period || '30d'; // Default to 30d if not provided
   const currency = req.query.currency || 'usd'; // Default to USD if not provided
 
-  let startDate;
   const now = new Date();
 
-  // Determine the start date based on the requested period
-  switch (period) {
-    case 'today':
-      startDate = startOfDay(now);
-      break;
-    case '7d':
-      startDate = subDays(now, 7);
-      break;
-    case '30d':
-    default:
-      startDate = subDays(now, 30);
-      break;
-  }
+  // Use a map for a more declarative way to determine the start date.
+  // This is easier to read and extend than a switch statement.
+  const periodMap = {
+    'today': () => startOfDay(now),
+    '7d': () => subDays(now, 7),
+    '30d': () => subDays(now, 30),
+  };
+  const startDate = (periodMap[period] || periodMap['30d'])();
 
   try {
     // 1. Calculate stats for the requested period, filtered by currency
