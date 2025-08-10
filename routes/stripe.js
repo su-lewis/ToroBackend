@@ -8,8 +8,8 @@ const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
 
 // --- Constants for payment logic ---
-const PLATFORM_FEE_PERCENTAGE = 0.15; // 15%
-const MINIMUM_SEND_AMOUNT_DOLLARS = 5.00;
+const PLATFORM_FEE_PERCENTAGE = 0.15; // 15% platform fee
+const MINIMUM_SEND_AMOUNT_USD_EQUIVALENT = 5.00; // The minimum amount a user can send, in USD equivalent.
 
 // Helper function to map country to a common currency
 const getCurrencyForCountry = (countryCode) => {
@@ -83,10 +83,6 @@ router.post('/create-checkout-session', async (req, res) => {
         if (!req.body) return res.status(400).json({ message: 'Request body is missing.' });
         const { amount: amountForCreatorDollars, recipientUsername, donorName } = req.body;
 
-        if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT_DOLLARS) {
-            return res.status(400).json({ message: `Valid amount for creator (min $${MINIMUM_SEND_AMOUNT_DOLLARS.toFixed(2)} equivalent) and recipient username required.` });
-        }
-
         const recipientUser = await prisma.user.findUnique({
             where: { username: recipientUsername },
             select: { id: true, username: true, displayName: true, stripeAccountId: true, stripeOnboardingComplete: true }
@@ -97,6 +93,12 @@ router.post('/create-checkout-session', async (req, res) => {
 
         const connectedAccount = await stripe.accounts.retrieve(recipientUser.stripeAccountId);
         const chargeCurrency = connectedAccount.default_currency || getCurrencyForCountry(connectedAccount.country);
+
+        // --- FIX: Validate the minimum amount *after* determining the currency ---
+        // This ensures the check is against a USD-equivalent value. For simplicity, we'll check the raw dollar value.
+        if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT_USD_EQUIVALENT) {
+            return res.status(400).json({ message: `A valid recipient and amount (min $${MINIMUM_SEND_AMOUNT_USD_EQUIVALENT.toFixed(2)} USD or equivalent) are required.` });
+        }
 
         // Convert to cents immediately to avoid floating-point inaccuracies.
         const creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
