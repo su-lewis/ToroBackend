@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "dev": "nodemon index.js",
+    "dev": "npx prisma generate && nodemon index.js",
     "build": "npx prisma generate",
     "start": "npx prisma migrate deploy && node index.js",
     "lint": "eslint ."

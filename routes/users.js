@@ -136,42 +136,40 @@ router.post('/update-password', authMiddleware, async (req, res) => {
     }
 });
 
-// --- CORRECTED: Securely Update User Email (with confirmation) ---
+// --- Securely Update User Email (no confirmation) ---
 router.post('/update-email', authMiddleware, async (req, res) => {
     const { currentPassword, newEmail } = req.body;
     const supabaseUser = req.user;
 
     if (!currentPassword || !newEmail) return res.status(400).json({ message: 'Current password and new email are required.' });
-    if (newEmail.toLowerCase() === supabaseUser.email.toLowerCase()) return res.status(400).json({ message: 'New email must be different from the current one.' });
+    const trimmedNewEmail = newEmail.trim().toLowerCase();
+    if (trimmedNewEmail === supabaseUser.email.toLowerCase()) return res.status(400).json({ message: 'New email must be different from the current one.' });
 
     try {
         // Step 1: Verify the current password using the helper.
         await verifyCurrentUserPassword(supabaseUser.email, currentPassword);
 
+        // Step 2: Update the email directly using the admin client.
         const supabaseAdmin = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+        const { error: updateUserError } = await supabaseAdmin.auth.admin.updateUserById(
+            supabaseUser.id,
+            { email: trimmedNewEmail }
+        );
 
-        // This URL is where the user will be sent after confirming the change.
-        const redirectTo = `${process.env.FRONTEND_URL}/dashboard/account-settings?email_updated=true`;
-
-        // Step 2: Generate a secure email change link.
-        // This sends a confirmation link to the user's CURRENT email address.
-        const { error: linkError } = await supabaseAdmin.auth.admin.generateLink({
-            type: 'email_change_current',
-            email: supabaseUser.email,
-            newEmail: newEmail,
-            options: { 
-                redirectTo: redirectTo 
-            }
-        });
-
-        if (linkError) {
-            if (linkError.message.includes('unique constraint') || linkError.message.includes('already registered')) {
+        if (updateUserError) {
+            if (updateUserError.message.includes('unique constraint') || updateUserError.message.includes('already registered')) {
                 return res.status(409).json({ message: 'This email address is already in use.' });
             }
-            throw linkError; // Let the main catch block handle logging and the 500 response
+            throw updateUserError; // Let the main catch block handle other errors
         }
 
-        res.status(200).json({ message: `A confirmation link has been sent to your current email address (${supabaseUser.email}) to approve the change.` });
+        // Step 3: Also update the email in our local Prisma database.
+        await prisma.user.update({
+            where: { supabaseAuthId: supabaseUser.id },
+            data: { email: trimmedNewEmail },
+        });
+
+        res.status(200).json({ message: `Email updated successfully to ${trimmedNewEmail}.` });
     } catch (error) {
         if (error.status === 401) {
             return res.status(401).json({ message: error.message });

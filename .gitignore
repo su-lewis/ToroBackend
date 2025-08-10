@@ -1,5 +1,23 @@
+# Dependencies
 node_modules
+
+# Build artifacts
+dist
+build
+
 # Keep environment variables out of version control
 .env
+.env.*
+!.env.example
 
+# Logs
+logs
+*.log
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# The Prisma Client is generated upon install/build, so it's often excluded.
 /generated/prisma
+
