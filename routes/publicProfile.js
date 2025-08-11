@@ -19,6 +19,7 @@ router.get('/profile/:username', async (req, res) => {
      profileBackgroundColor: true,
         stripeAccountId: true, // For frontend to know if payments can be made
         stripeOnboardingComplete: true, // For frontend logic
+          preferredCurrency: true, 
         links: {
           orderBy: { order: 'asc' }, // Or createdAt
           select: {

@@ -86,14 +86,26 @@ router.post('/create-checkout-session', async (req, res) => {
 
         const recipientUser = await prisma.user.findUnique({
             where: { username: recipientUsername },
-            select: { id: true, username: true, displayName: true, stripeAccountId: true, stripeOnboardingComplete: true }
+            // --- FIX #1: Select the 'preferredCurrency' field from your database ---
+            select: { 
+                id: true, 
+                username: true, 
+                displayName: true, 
+                stripeAccountId: true, 
+                stripeOnboardingComplete: true, 
+                preferredCurrency: true // This is the new, crucial part
+            }
         });
+
         if (!recipientUser || !recipientUser.stripeAccountId || !recipientUser.stripeOnboardingComplete) {
             return res.status(400).json({ message: 'This creator is not set up for payments.' });
         }
 
-        const connectedAccount = await stripe.accounts.retrieve(recipientUser.stripeAccountId);
-        const chargeCurrency = connectedAccount.default_currency || getCurrencyForCountry(connectedAccount.country);
+        // --- FIX #2: Use the currency from YOUR database, not Stripe's default ---
+        // This is the most important change. We now honor the user's setting.
+        const chargeCurrency = recipientUser.preferredCurrency || 'usd';
+
+        // --- No other changes are needed below this line ---
 
         if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT_USD_EQUIVALENT) {
             return res.status(400).json({ message: `A valid recipient and amount (min $${MINIMUM_SEND_AMOUNT_USD_EQUIVALENT.toFixed(2)} USD or equivalent) are required.` });
@@ -119,7 +131,7 @@ router.post('/create-checkout-session', async (req, res) => {
             payment_method_types: ['card', 'klarna', 'link'],
             line_items: [{
                 price_data: {
-                    currency: chargeCurrency,
+                    currency: chargeCurrency, // This now correctly uses the user's preference
                     product_data: { name: productName },
                     unit_amount: grossAmountInCents
                 },
@@ -150,6 +162,7 @@ router.post('/create-checkout-session', async (req, res) => {
         res.status(500).json({ message: 'Error creating payment session', error: error.message });
     }
 });
+
 // 4. CREATE STRIPE EXPRESS DASHBOARD LOGIN LINK
 // (This route's logic is fine and doesn't need to change, but including for completeness)
 router.post('/create-express-dashboard-link', authMiddleware, async (req, res) => {
