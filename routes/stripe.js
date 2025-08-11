@@ -9,6 +9,7 @@ const { authMiddleware } = require('../middleware/auth');
 
 // --- Constants for payment logic ---
 const PLATFORM_FEE_PERCENTAGE = 0.15; // 15% platform fee
+const PLATFORM_FEE_FIXED_CENTS = 100; // $1.00 in cents
 const MINIMUM_SEND_AMOUNT_USD_EQUIVALENT = 5.00; // The minimum amount a user can send, in USD equivalent.
 
 // Helper function to map country to a common currency
@@ -77,7 +78,7 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
 });
 
 
-// 3. Create Stripe Checkout Session (MODEL: Simple Add-On Fee, Implicit Fee for Stripe)
+// 3. Create Stripe Checkout Session (MODEL: Add-On Fee)
 router.post('/create-checkout-session', async (req, res) => {
     try {
         if (!req.body) return res.status(400).json({ message: 'Request body is missing.' });
@@ -94,26 +95,20 @@ router.post('/create-checkout-session', async (req, res) => {
         const connectedAccount = await stripe.accounts.retrieve(recipientUser.stripeAccountId);
         const chargeCurrency = connectedAccount.default_currency || getCurrencyForCountry(connectedAccount.country);
 
-        // --- FIX: Validate the minimum amount *after* determining the currency ---
-        // This ensures the check is against a USD-equivalent value. For simplicity, we'll check the raw dollar value.
         if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT_USD_EQUIVALENT) {
             return res.status(400).json({ message: `A valid recipient and amount (min $${MINIMUM_SEND_AMOUNT_USD_EQUIVALENT.toFixed(2)} USD or equivalent) are required.` });
         }
 
-        // Convert to cents immediately to avoid floating-point inaccuracies.
+        // Convert to cents immediately.
         const creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
-        const platformFeeInCents = Math.round(creatorReceivesAmountInCents * PLATFORM_FEE_PERCENTAGE);
+        
+        // --- MODIFIED FEE CALCULATION ---
+        const platformFeeInCents = Math.round((creatorReceivesAmountInCents * PLATFORM_FEE_PERCENTAGE) + PLATFORM_FEE_FIXED_CENTS);
+        
         const grossAmountInCents = creatorReceivesAmountInCents + platformFeeInCents;
         
-        const MINIMUM_CHARGE_CENTS = {
-            'usd': 50,
-            'cad': 50,
-            'aud': 50,
-            'gbp': 50,
-            'eur': 50,
-        };
-
-        const minChargeInCents = MINIMUM_CHARGE_CENTS[chargeCurrency] || 50; // Default to 50 for unlisted currencies
+        const MINIMUM_CHARGE_CENTS = { 'usd': 50, 'cad': 50, 'aud': 50, 'gbp': 50, 'eur': 50 };
+        const minChargeInCents = MINIMUM_CHARGE_CENTS[chargeCurrency] || 50;
         if (grossAmountInCents < minChargeInCents) {
             return res.status(400).json({ message: `The total charge amount is below the minimum required.` });
         }
@@ -134,19 +129,13 @@ router.post('/create-checkout-session', async (req, res) => {
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${(creatorReceivesAmountInCents / 100).toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
             payment_intent_data: {
-                // By using `transfer_data.amount`, Stripe automatically calculates
-                // the platform fee as (total charge - amount to creator).
-                // This is the modern and recommended approach for Connect payments.
-                // It replaces the need for `application_fee_amount` and `on_behalf_of`.
                 transfer_data: { 
                     destination: recipientUser.stripeAccountId,
                     amount: creatorReceivesAmountInCents,
                 },
-                // `on_behalf_of` is not used with destination charges.
             },
             billing_address_collection: 'required',
             metadata: {
-                // Metadata remains the same and is very useful for your webhook
                 appRecipientUserId: recipientUser.id,
                 grossAmountChargedToDonor: grossAmountInCents.toString(),
                 intendedAmountForCreator: creatorReceivesAmountInCents.toString(),
@@ -161,7 +150,6 @@ router.post('/create-checkout-session', async (req, res) => {
         res.status(500).json({ message: 'Error creating payment session', error: error.message });
     }
 });
-
 // 4. CREATE STRIPE EXPRESS DASHBOARD LOGIN LINK
 // (This route's logic is fine and doesn't need to change, but including for completeness)
 router.post('/create-express-dashboard-link', authMiddleware, async (req, res) => {
