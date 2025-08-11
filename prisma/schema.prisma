@@ -35,6 +35,8 @@ model User {
 
   // Store the user's preference for automatic instant payouts
   stripeAutoPayoutsEnabled Boolean   @default(false)
+  
+  preferredCurrency        String?   @default("usd") // e.g., "usd", "eur", "gbp"
 
   // Relations
   links                    Link[]
