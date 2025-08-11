@@ -1,5 +1,3 @@
-// backend/prisma/schema.prisma
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -17,63 +15,55 @@ model User {
   displayName              String?
   bio                      String?
   profileImageUrl          String?
-  bannerImageUrl           String?   
+  stripeAccountId          String?   @unique
+  stripeOnboardingComplete Boolean   @default(false)
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+  bannerImageUrl           String?
   profileBackgroundColor   String?   @default("#FFFFFF")
-
-  // Optional fields you might collect or prefill for Stripe
   country                  String?
-  phone                    String?
-  firstName                String?
-  lastName                 String?
   dobDay                   Int?
   dobMonth                 Int?
   dobYear                  Int?
-
-  // Stripe fields
-  stripeAccountId          String?   @unique
-  stripeOnboardingComplete Boolean   @default(false)
-
-  // Store the user's preference for automatic instant payouts
+  firstName                String?
+  lastName                 String?
+  phone                    String?
   stripeAutoPayoutsEnabled Boolean   @default(false)
-  
-  preferredCurrency        String?   @default("usd") // e.g., "usd", "eur", "gbp"
-
-  // Relations
+  stripeAccountCountry     String?
+  stripeDefaultCurrency    String?
+  preferredCurrency        String?   @default("usd")
   links                    Link[]
   paymentsReceived         Payment[] @relation("RecipientPayments")
-  
-  createdAt                DateTime  @default(now())
-  updatedAt                DateTime  @updatedAt
 
   @@index([supabaseAuthId])
   @@index([username])
 }
 
 model Link {
-  id          String   @id @default(cuid())
-  title       String
-  url         String
-  userId      String
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  order       Int?
-  clicks      Int      @default(0)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id        String   @id @default(cuid())
+  title     String
+  url       String
+  userId    String
+  order     Int?
+  clicks    Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
 }
 
 model Payment {
-  id                    String    @id @default(cuid())
-  stripePaymentIntentId String    @unique
+  id                    String   @id @default(cuid())
+  stripePaymentIntentId String   @unique
   amount                Int
   currency              String
   status                String
   recipientUserId       String
-  recipient             User      @relation("RecipientPayments", fields: [recipientUserId], references: [id], onDelete: Restrict)
   payerEmail            String?
-  payerName             String?
   platformFee           Int?
   netAmountToRecipient  Int?
-  createdAt             DateTime  @default(now())
+  createdAt             DateTime @default(now())
+  payerName             String?
+  recipient             User     @relation("RecipientPayments", fields: [recipientUserId], references: [id])
 }

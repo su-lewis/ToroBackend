@@ -35,10 +35,17 @@ const authMiddleware = async (req, res, next) => {
     req.user = user;
 
     // 5. Fetch the corresponding user profile from your local Prisma database
-    const localUser = await prisma.user.findUnique({
+     const localUser = await prisma.user.findUnique({
       where: { supabaseAuthId: user.id },
+      // By explicitly selecting, we avoid errors if a new column is missing.
+      select: {
+        id: true,
+        supabaseAuthId: true,
+        username: true,
+        stripeAccountId: true,
+        stripeOnboardingComplete: true
+      }
     });
-
     // 6. Attach the local user profile. It's okay if it's null for new users.
     req.localUser = localUser;
 
