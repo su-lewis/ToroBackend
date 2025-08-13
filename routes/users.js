@@ -28,15 +28,46 @@ router.get('/me', authMiddleware, async (req, res) => {
   if (!req.user) {
     return res.status(401).json({ message: 'User not authenticated (no Supabase user context).' });
   }
-  if (!req.localUser) {
-    // console.log(`GET /api/users/me: App profile not found for Supabase user ${req.user.id}. Prompting profile setup.`);
-    return res.status(404).json({ 
+
+  // Fetch a fresh copy with explicit fields to ensure completeness
+  const profile = await prisma.user.findUnique({
+    where: { supabaseAuthId: req.user.id },
+    select: {
+      id: true,
+      supabaseAuthId: true,
+      email: true,
+      username: true,
+      displayName: true,
+      bio: true,
+      profileImageUrl: true,
+      bannerImageUrl: true,
+      profileBackgroundColor: true,
+      country: true,
+      dobDay: true,
+      dobMonth: true,
+      dobYear: true,
+      firstName: true,
+      lastName: true,
+      phone: true,
+      preferredCurrency: true,
+      stripeAccountId: true,
+      stripeOnboardingComplete: true,
+      stripeAutoPayoutsEnabled: true,
+      stripeAccountCountry: true,
+      stripeDefaultCurrency: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+
+  if (!profile) {
+    return res.status(404).json({
       message: 'Application profile not found. Please complete your profile setup.',
-      code: 'PROFILE_NOT_FOUND' 
+      code: 'PROFILE_NOT_FOUND'
     });
   }
-  // console.log(`GET /api/users/me: Successfully retrieved profile for Supabase user ${req.user.id}`);
-  res.json(req.localUser); // req.localUser should contain all fields from Prisma User model
+
+  res.json(profile);
 });
 
 // POST Create or Update user's application profile
