@@ -23,52 +23,26 @@ const verifyCurrentUserPassword = async (email, password) => {
 };
 
 // GET current logged-in user's application profile
-// Fetches all relevant fields including avatar and banner URLs
 router.get('/me', authMiddleware, async (req, res) => {
   if (!req.user) {
+    // This check is good as a safeguard
     return res.status(401).json({ message: 'User not authenticated (no Supabase user context).' });
   }
 
-  // Fetch a fresh copy with explicit fields to ensure completeness
-  const profile = await prisma.user.findUnique({
-    where: { supabaseAuthId: req.user.id },
-    select: {
-      id: true,
-      supabaseAuthId: true,
-      email: true,
-      username: true,
-      displayName: true,
-      bio: true,
-      profileImageUrl: true,
-      bannerImageUrl: true,
-      profileBackgroundColor: true,
-      country: true,
-      dobDay: true,
-      dobMonth: true,
-      dobYear: true,
-      firstName: true,
-      lastName: true,
-      phone: true,
-      preferredCurrency: true,
-      stripeAccountId: true,
-      stripeOnboardingComplete: true,
-      stripeAutoPayoutsEnabled: true,
-      stripeAccountCountry: true,
-      stripeDefaultCurrency: true,
-      createdAt: true,
-      updatedAt: true,
-    },
-  });
-
-  if (!profile) {
+  // --- THIS IS THE IMPROVEMENT ---
+  // The 'authMiddleware' has already fetched the complete profile for us.
+  // We can just use it directly. No need for another database call.
+  if (!req.localUser) {
     return res.status(404).json({
       message: 'Application profile not found. Please complete your profile setup.',
       code: 'PROFILE_NOT_FOUND'
     });
   }
 
-  res.json(profile);
+  // Simply return the user object that the middleware already prepared.
+  res.json(req.localUser);
 });
+
 
 // POST Create or Update user's application profile
 router.post('/profile', authMiddleware, async (req, res) => {
