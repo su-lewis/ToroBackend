@@ -31,7 +31,9 @@ model User {
   stripeAutoPayoutsEnabled Boolean   @default(false)
   stripeAccountCountry     String?
   stripeDefaultCurrency    String?
-  preferredCurrency        String?   @default("usd")
+  
+  preferredCurrency        String?   @default("usd") // <-- Add this line
+
   links                    Link[]
   paymentsReceived         Payment[] @relation("RecipientPayments")
 
