@@ -59,18 +59,35 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
 });
 
 // 2. Get Stripe Account Status
-// (This route's logic is fine and doesn't need to change, but including for completeness)
+// --- THIS ROUTE IS NOW CORRECTED AND UPDATED ---
 router.get('/connect/account-status', authMiddleware, async (req, res) => {
     try {
         if (!req.localUser?.id) return res.status(403).json({ message: 'User profile not found.' });
         const user = req.localUser;
         if (!user.stripeAccountId) return res.status(404).json({ message: 'Stripe account not connected for this user.' });
+
         const account = await stripe.accounts.retrieve(user.stripeAccountId);
         const onboardingComplete = !!(account.charges_enabled && account.details_submitted && account.payouts_enabled);
-        if (user.stripeOnboardingComplete !== onboardingComplete) {
-            await prisma.user.update({ where: { id: user.id }, data: { stripeOnboardingComplete: onboardingComplete }});
-        }
-        res.json({ stripeAccountId: user.stripeAccountId, detailsSubmitted: account.details_submitted, chargesEnabled: account.charges_enabled, payoutsEnabled: account.payouts_enabled, onboardingComplete: onboardingComplete, accountCountry: account.country, defaultCurrency: account.default_currency, });
+
+        // **CORRECTED LOGIC**: Update our database with the latest info from Stripe
+        await prisma.user.update({
+            where: { id: user.id },
+            data: {
+                stripeOnboardingComplete: onboardingComplete,
+                stripeDefaultCurrency: account.default_currency, // e.g., 'eur'
+                stripeAccountCountry: account.country, // e.g., 'DE'
+            },
+        });
+
+        res.json({
+            stripeAccountId: user.stripeAccountId,
+            detailsSubmitted: account.details_submitted,
+            chargesEnabled: account.charges_enabled,
+            payoutsEnabled: account.payouts_enabled,
+            onboardingComplete: onboardingComplete,
+            accountCountry: account.country,
+            defaultCurrency: account.default_currency,
+        });
     } catch (error) {
         console.error('[/account-status] Error:', error.message, error.stack);
         res.status(500).json({ message: 'Error fetching Stripe account status', error: error.message });
@@ -78,7 +95,8 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
 });
 
 
-// 3. Create Stripe Checkout Session (MODEL: Add-On Fee)
+// 3. Create Stripe Checkout Session
+// --- THIS ROUTE IS NOW CORRECTED AND UPDATED ---
 router.post('/create-checkout-session', async (req, res) => {
     try {
         if (!req.body) return res.status(400).json({ message: 'Request body is missing.' });
@@ -86,14 +104,14 @@ router.post('/create-checkout-session', async (req, res) => {
 
         const recipientUser = await prisma.user.findUnique({
             where: { username: recipientUsername },
-            // --- FIX #1: Select the 'preferredCurrency' field from your database ---
-            select: { 
-                id: true, 
-                username: true, 
-                displayName: true, 
-                stripeAccountId: true, 
-                stripeOnboardingComplete: true, 
-                preferredCurrency: true // This is the new, crucial part
+            select: {
+                id: true,
+                username: true,
+                displayName: true,
+                stripeAccountId: true,
+                stripeOnboardingComplete: true,
+                preferredCurrency: true,      // For the user's choice ("usd" or "native")
+                stripeDefaultCurrency: true,  // For the actual native currency (e.g., "eur")
             }
         });
 
@@ -101,16 +119,18 @@ router.post('/create-checkout-session', async (req, res) => {
             return res.status(400).json({ message: 'This creator is not set up for payments.' });
         }
 
-        // --- FIX #2: Use the currency from YOUR database, not Stripe's default ---
-        // This is the most important change. We now honor the user's setting.
-        const chargeCurrency = recipientUser.preferredCurrency || 'usd';
-
-        // --- No other changes are needed below this line ---
+        // **NEW CURRENCY LOGIC**: Honor the user's preference
+        let chargeCurrency;
+        if (recipientUser.preferredCurrency === 'usd') {
+            chargeCurrency = 'usd';
+        } else {
+            // "native" was chosen, so use their Stripe currency, with USD as a safe fallback
+            chargeCurrency = recipientUser.stripeDefaultCurrency || 'usd';
+        }
 
         if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT_USD_EQUIVALENT) {
             return res.status(400).json({ message: `A valid recipient and amount (min $${MINIMUM_SEND_AMOUNT_USD_EQUIVALENT.toFixed(2)} USD or equivalent) are required.` });
         }
-
         // Convert to cents immediately.
         const creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
         

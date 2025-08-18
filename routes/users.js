@@ -1,12 +1,12 @@
-// backend/routes/users.js
+// File: backend/routes/users.js
+
 const express = require('express');
 const router = express.Router();
-const prisma = require('../lib/prisma'); // Using the separated Prisma client
+const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
-const { createClient } = require('@supabase/supabase-js'); // Needed for re-authentication
+const { createClient } = require('@supabase/supabase-js');
 
 // --- Helper Function for Password Verification ---
-// This abstracts the common logic of verifying a user's current password.
 const verifyCurrentUserPassword = async (email, password) => {
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
   const { error } = await supabase.auth.signInWithPassword({
@@ -15,7 +15,6 @@ const verifyCurrentUserPassword = async (email, password) => {
   });
 
   if (error) {
-    // Create a custom error to be caught and handled by the route.
     const authError = new Error('Incorrect password.');
     authError.status = 401; // Unauthorized
     throw authError;
@@ -23,15 +22,12 @@ const verifyCurrentUserPassword = async (email, password) => {
 };
 
 // GET current logged-in user's application profile
+// This route now simply returns the full user profile fetched by the auth middleware.
 router.get('/me', authMiddleware, async (req, res) => {
   if (!req.user) {
-    // This check is good as a safeguard
     return res.status(401).json({ message: 'User not authenticated (no Supabase user context).' });
   }
-
-  // --- THIS IS THE IMPROVEMENT ---
-  // The 'authMiddleware' has already fetched the complete profile for us.
-  // We can just use it directly. No need for another database call.
+  
   if (!req.localUser) {
     return res.status(404).json({
       message: 'Application profile not found. Please complete your profile setup.',
@@ -39,39 +35,40 @@ router.get('/me', authMiddleware, async (req, res) => {
     });
   }
 
-  // Simply return the user object that the middleware already prepared.
   res.json(req.localUser);
 });
 
 
 // POST Create or Update user's application profile
+// This route is now more flexible and allows for partial updates.
 router.post('/profile', authMiddleware, async (req, res) => {
-  const { 
-    username, 
-    displayName, 
-    bio, 
-    profileImageUrl, // URL from Supabase Storage for avatar
+  const {
+    username,
+    displayName,
+    bio,
+    profileImageUrl,
     bannerImageUrl,
-    profileBackgroundColor // Optional background color for profile
-  } = req.body; 
-  
+    profileBackgroundColor,
+    preferredCurrency // Added for currency updates
+  } = req.body;
+
   if (!req.user || !req.user.id) {
     return res.status(401).json({ message: "Authentication error: Supabase user ID missing." });
   }
   const supabaseAuthId = req.user.id;
-  const userEmail = req.user.email; // Get email from authenticated Supabase user
+  
+  // --- FIX: Only validate username IF it is provided in the request body ---
+  if (username !== undefined) {
+    if (typeof username !== 'string' || username.trim() === '') {
+      return res.status(400).json({ message: "Username cannot be empty." });
+    }
+    const trimmedUsername = username.trim();
+    if (!/^[a-zA-Z0-9_.-]{3,20}$/.test(trimmedUsername)) {
+      return res.status(400).json({ message: "Username must be 3-20 characters (letters, numbers, _, ., -)." });
+    }
 
-  if (!username || typeof username !== 'string' || username.trim() === '') {
-    return res.status(400).json({ message: "Username is required and cannot be empty." });
-  }
-  const trimmedUsername = username.trim();
-  if (!/^[a-zA-Z0-9_.-]{3,20}$/.test(trimmedUsername)) {
-    return res.status(400).json({ message: "Username must be 3-20 characters (letters, numbers, _, ., -)." });
-  }
-
-  try {
     const existingUserByUsername = await prisma.user.findFirst({
-      where: { 
+      where: {
         username: { equals: trimmedUsername, mode: 'insensitive' },
         NOT: { supabaseAuthId: supabaseAuthId }
       },
@@ -80,32 +77,37 @@ router.post('/profile', authMiddleware, async (req, res) => {
     if (existingUserByUsername) {
       return res.status(409).json({ message: "Username is already taken by another user." });
     }
+  }
 
-    // Define a single data object for the profile information.
-    // Prisma's `update` will ignore any fields that are `undefined`.
+  try {
     const profileData = {
-      username: trimmedUsername,
-      displayName: displayName,
-      bio: bio,
-      email: userEmail,
-      profileImageUrl: profileImageUrl,
-      bannerImageUrl: bannerImageUrl,
-      profileBackgroundColor: profileBackgroundColor,
+      // Use trimmed username only if it was provided, otherwise it remains undefined and is ignored by Prisma
+      username: username !== undefined ? username.trim() : undefined,
+      displayName,
+      bio,
+      profileImageUrl,
+      bannerImageUrl,
+      profileBackgroundColor,
+      preferredCurrency
     };
 
-    const upsertedUser = await prisma.user.upsert({
-      where: { supabaseAuthId: supabaseAuthId }, // Find user by their Supabase Auth ID
-      update: profileData,
-      create: { ...profileData, supabaseAuthId: supabaseAuthId },
+    // Use `update` instead of `upsert`. `upsert` is for "create if not exist," 
+    // but the /me route and auth middleware should handle profile creation logic.
+    const updatedUser = await prisma.user.update({
+      where: { supabaseAuthId: supabaseAuthId },
+      data: profileData,
     });
 
-    console.log(`POST /api/users/profile: Profile successfully upserted for Supabase user ${supabaseAuthId}`);
-    res.status(200).json(upsertedUser);
+    res.status(200).json(updatedUser);
 
   } catch (error) {
     console.error(`POST /api/users/profile error for Supabase user ${supabaseAuthId}:`, error);
     if (error.code === 'P2002' && error.meta?.target?.includes('username')) {
       return res.status(409).json({ message: "This username is already registered (database constraint)." });
+    }
+    // Handle case where user might not exist yet if using `update` strictly
+    if (error.code === 'P2025') {
+       return res.status(404).json({ message: "User profile not found to update." });
     }
     res.status(500).json({ message: "An error occurred while saving the profile.", error: error.message });
   }
