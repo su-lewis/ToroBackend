@@ -140,10 +140,22 @@ router.post('/create-checkout-session', async (req, res) => {
         }
         
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
-        const productDescription = `A one-time payment to support the creator. Thank you!`;
-        // Max 22 chars, will be prefixed by your business name from Stripe.
-        const statementDescriptorSuffix = `*${recipientUser.username}`.substring(0, 22);
+          // --- THIS IS THE FINAL, CORRECTED LOGIC ---
+        const prefix = process.env.STRIPE_STATEMENT_DESCRIPTOR_PREFIX;
+        if (!prefix) {
+            console.error("CRITICAL: STRIPE_STATEMENT_DESCRIPTOR_PREFIX is not set in environment variables.");
+            // Fallback to a generic descriptor if the prefix is missing
+            return res.status(500).json({ message: "Server configuration error." });
+        }
         
+        // Calculate the maximum allowed length for the suffix
+        // Total length (22) - prefix length - 2 (for '*' and ' ')
+        const maxSuffixLength = 22 - (prefix.length + 2);
+        
+        // Sanitize username and truncate to the safe, calculated length
+        const sanitizedUsername = recipientUser.username.replace(/['"*<>]/g, '');
+        const statementDescriptorSuffix = sanitizedUsername.substring(0, maxSuffixLength);
+        // --- END OF FIX ---
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card', 'klarna', 'link'],
             line_items: [{
