@@ -1,25 +1,22 @@
-// backend/middleware/auth.js
+// File: backend/middleware/auth.js (Corrected Version)
+
 const { createClient } = require('@supabase/supabase-js');
 const prisma = require('../lib/prisma');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 const authMiddleware = async (req, res, next) => {
-  // 1. Check for the Authorization header
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ message: 'Authentication required: No token provided.' });
   }
 
-  // 2. Extract the token
   const token = authHeader.split(' ')[1];
   if (!token) {
     return res.status(401).json({ message: 'Authentication required: Malformed token.' });
   }
 
   try {
-    // 3. Securely validate the token and get the user from Supabase.
-    //    This is the recommended approach and fixes the security warning.
     const { data: { user }, error } = await supabase.auth.getUser(token);
 
     if (error) {
@@ -31,11 +28,10 @@ const authMiddleware = async (req, res, next) => {
       return res.status(401).json({ message: 'Authentication failed: User not found for this token.' });
     }
 
-    // 4. Attach the authenticated Supabase user to the request object
     req.user = user;
 
-    // 5. Fetch the corresponding user profile from your local Prisma database
-    //    Select all fields needed by the dashboard Profile page and other routes.
+    // --- THIS IS THE FIX ---
+    // We are now selecting the new `payoutsInUsd` field and have removed the old `preferredCurrency` field.
     const localUser = await prisma.user.findUnique({
       where: { supabaseAuthId: user.id },
       select: {
@@ -55,7 +51,7 @@ const authMiddleware = async (req, res, next) => {
         firstName: true,
         lastName: true,
         phone: true,
-        preferredCurrency: true,
+        payoutsInUsd: true, // <-- The new, correct field
         stripeAccountId: true,
         stripeOnboardingComplete: true,
         stripeAutoPayoutsEnabled: true,
@@ -65,10 +61,9 @@ const authMiddleware = async (req, res, next) => {
         updatedAt: true,
       }
     });
-    // 6. Attach the local user profile. It's okay if it's null for new users.
+    
     req.localUser = localUser;
 
-    // 7. Proceed to the next middleware or route handler
     next();
   } catch (err) {
     console.error('Auth middleware internal error:', err);
