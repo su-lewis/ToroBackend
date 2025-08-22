@@ -32,7 +32,7 @@ model User {
   stripeAccountCountry     String?
   stripeDefaultCurrency    String?
   
-  preferredCurrency        String?   @default("usd") // <-- Add this line
+  payoutsInUsd             Boolean   @default(true)
 
   links                    Link[]
   paymentsReceived         Payment[] @relation("RecipientPayments")

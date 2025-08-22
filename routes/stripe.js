@@ -12,16 +12,6 @@ const PLATFORM_FEE_PERCENTAGE = 0.15; // 15% platform fee
 const PLATFORM_FEE_FIXED_CENTS = 100; // $1.00 in cents
 const MINIMUM_SEND_AMOUNT_USD_EQUIVALENT = 5.00; // The minimum amount a user can send, in USD equivalent.
 
-// Helper function to map country to a common currency
-const getCurrencyForCountry = (countryCode) => {
-    const currencyMap = { 'US': 'usd', 'CA': 'cad', 'GB': 'gbp', 'AU': 'aud', 'DE': 'eur', 'FR': 'eur', 'ES': 'eur', 'IT': 'eur', 'IE': 'eur', 'NL': 'eur', 'PT': 'eur' };
-    const currency = currencyMap[countryCode.toUpperCase()];
-    if (!currency) {
-        return 'usd';
-    }
-    return currency;
-};
-
 // 1. Create Stripe Connect Account and Onboarding Link
 // (This route's logic is fine and doesn't need to change, but including for completeness)
 router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
@@ -110,7 +100,7 @@ router.post('/create-checkout-session', async (req, res) => {
                 displayName: true,
                 stripeAccountId: true,
                 stripeOnboardingComplete: true,
-                preferredCurrency: true,      // For the user's choice ("usd" or "native")
+                payoutsInUsd: true,      // For the user's choice ("usd" or "native")
                 stripeDefaultCurrency: true,  // For the actual native currency (e.g., "eur")
             }
         });
@@ -119,15 +109,16 @@ router.post('/create-checkout-session', async (req, res) => {
             return res.status(400).json({ message: 'This creator is not set up for payments.' });
         }
 
-        // **NEW CURRENCY LOGIC**: Honor the user's preference
-        let chargeCurrency;
-        if (recipientUser.preferredCurrency === 'usd') {
+          let chargeCurrency;
+        if (recipientUser.payoutsInUsd) {
+            // User has explicitly chosen to be paid in USD.
             chargeCurrency = 'usd';
         } else {
-            // "native" was chosen, so use their Stripe currency, with USD as a safe fallback
+            // User wants to be paid in their native currency.
+            // Use their Stripe default currency, with a safe fallback to USD if it's somehow missing.
             chargeCurrency = recipientUser.stripeDefaultCurrency || 'usd';
         }
-
+        
         if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT_USD_EQUIVALENT) {
             return res.status(400).json({ message: `A valid recipient and amount (min $${MINIMUM_SEND_AMOUNT_USD_EQUIVALENT.toFixed(2)} USD or equivalent) are required.` });
         }
@@ -139,20 +130,26 @@ router.post('/create-checkout-session', async (req, res) => {
         
         const grossAmountInCents = creatorReceivesAmountInCents + platformFeeInCents;
         
+        // Note: These are Stripe's minimum charge amounts.
+        // See: https://stripe.com/docs/currencies#minimum-and-maximum-charge-amounts
+        // It's a good idea to verify these periodically.
         const MINIMUM_CHARGE_CENTS = { 'usd': 50, 'cad': 50, 'aud': 50, 'gbp': 50, 'eur': 50 };
         const minChargeInCents = MINIMUM_CHARGE_CENTS[chargeCurrency] || 50;
         if (grossAmountInCents < minChargeInCents) {
-            return res.status(400).json({ message: `The total charge amount is below the minimum required.` });
+            return res.status(400).json({ message: `The total charge amount is below the minimum of ${formatCurrency(minChargeInCents, chargeCurrency)}.` });
         }
         
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
+        const productDescription = `A one-time payment to support the creator. Thank you!`;
+        // Max 22 chars, will be prefixed by your business name from Stripe.
+        const statementDescriptorSuffix = `*${recipientUser.username}`.substring(0, 22);
         
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card', 'klarna', 'link'],
             line_items: [{
                 price_data: {
                     currency: chargeCurrency, // This now correctly uses the user's preference
-                    product_data: { name: productName },
+                    product_data: { name: productName, description: productDescription },
                     unit_amount: grossAmountInCents
                 },
                 quantity: 1
@@ -165,6 +162,7 @@ router.post('/create-checkout-session', async (req, res) => {
                     destination: recipientUser.stripeAccountId,
                     amount: creatorReceivesAmountInCents,
                 },
+                statement_descriptor_suffix: statementDescriptorSuffix,
             },
             billing_address_collection: 'required',
             metadata: {
@@ -234,8 +232,21 @@ router.post('/payouts/instant', authMiddleware, async (req, res) => {
         res.json({ success: true, message: `Instant payout of ${formatCurrency(payout.amount, payout.currency)} initiated.`, payoutId: payout.id });
 
     } catch (error) {
-        console.error("[/payouts/instant] Error:", error);
-        res.status(500).json({ message: error.message || "Failed to initiate instant payout. Ensure an eligible debit card is on file with Stripe." });
+        console.error("[/payouts/instant] Stripe Payout Error:", error);
+        let userMessage = "Failed to initiate instant payout. Please try again later.";
+        if (error.type === 'StripeInvalidRequestError') {
+            // These are common, actionable errors for the user.
+            if (error.code === 'balance_insufficient') {
+                userMessage = "Your available balance is insufficient for a payout.";
+            } else if (error.code === 'instant_payouts_unsupported') {
+                userMessage = "Instant Payouts are not supported for your bank account country.";
+            } else if (error.code === 'payouts_not_allowed') {
+                userMessage = "Payouts are currently disabled on your account. Please check your Stripe dashboard.";
+            } else {
+                userMessage = "Could not process payout. Please ensure you have an eligible debit card on file with Stripe for Instant Payouts.";
+            }
+        }
+        res.status(400).json({ message: userMessage, error: error.message });
     }
 });
 
