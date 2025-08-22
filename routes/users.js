@@ -49,7 +49,7 @@ router.post('/profile', authMiddleware, async (req, res) => {
     profileImageUrl,
     bannerImageUrl,
     profileBackgroundColor,
-    preferredCurrency // Added for currency updates
+    payoutsInUsd // Added for currency updates
   } = req.body;
 
   if (!req.user || !req.user.id) {
@@ -88,7 +88,7 @@ router.post('/profile', authMiddleware, async (req, res) => {
       profileImageUrl,
       bannerImageUrl,
       profileBackgroundColor,
-      preferredCurrency
+      payoutsInUsd
     };
 
     // Use `update` instead of `upsert`. `upsert` is for "create if not exist," 
