@@ -328,9 +328,15 @@ router.get('/balance', authMiddleware, async (req, res) => {
     }
 });
 
-// Helper function (can be placed at the bottom or in a separate file)
+// --- CORRECTED HELPER FUNCTION ---
 const formatCurrency = (cents, currency = 'USD') => {
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency: currency.toUpperCase() }).format(cents / 100);
+    // The key change is removing 'en-US' from the constructor.
+    // This allows the constructor to use the correct symbol for the provided currency code.
+    return new Intl.NumberFormat(undefined, { 
+        style: 'currency', 
+        currency: currency.toUpperCase() 
+    }).format(cents / 100);
 };
+
 
 module.exports = router;
