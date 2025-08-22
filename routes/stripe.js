@@ -84,9 +84,7 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
     }
 });
 
-
 // 3. Create Stripe Checkout Session
-// --- THIS ROUTE IS NOW CORRECTED AND UPDATED ---
 router.post('/create-checkout-session', async (req, res) => {
     try {
         if (!req.body) return res.status(400).json({ message: 'Request body is missing.' });
@@ -100,8 +98,8 @@ router.post('/create-checkout-session', async (req, res) => {
                 displayName: true,
                 stripeAccountId: true,
                 stripeOnboardingComplete: true,
-                payoutsInUsd: true,      // For the user's choice ("usd" or "native")
-                stripeDefaultCurrency: true,  // For the actual native currency (e.g., "eur")
+                payoutsInUsd: true,
+                stripeDefaultCurrency: true,
             }
         });
 
@@ -109,30 +107,21 @@ router.post('/create-checkout-session', async (req, res) => {
             return res.status(400).json({ message: 'This creator is not set up for payments.' });
         }
 
-          let chargeCurrency;
+        let chargeCurrency;
         if (recipientUser.payoutsInUsd) {
-            // User has explicitly chosen to be paid in USD.
             chargeCurrency = 'usd';
         } else {
-            // User wants to be paid in their native currency.
-            // Use their Stripe default currency, with a safe fallback to USD if it's somehow missing.
             chargeCurrency = recipientUser.stripeDefaultCurrency || 'usd';
         }
         
         if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT_USD_EQUIVALENT) {
             return res.status(400).json({ message: `A valid recipient and amount (min $${MINIMUM_SEND_AMOUNT_USD_EQUIVALENT.toFixed(2)} USD or equivalent) are required.` });
         }
-        // Convert to cents immediately.
+        
         const creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
-        
-        // --- MODIFIED FEE CALCULATION ---
         const platformFeeInCents = Math.round((creatorReceivesAmountInCents * PLATFORM_FEE_PERCENTAGE) + PLATFORM_FEE_FIXED_CENTS);
-        
         const grossAmountInCents = creatorReceivesAmountInCents + platformFeeInCents;
         
-        // Note: These are Stripe's minimum charge amounts.
-        // See: https://stripe.com/docs/currencies#minimum-and-maximum-charge-amounts
-        // It's a good idea to verify these periodically.
         const MINIMUM_CHARGE_CENTS = { 'usd': 50, 'cad': 50, 'aud': 50, 'gbp': 50, 'eur': 50 };
         const minChargeInCents = MINIMUM_CHARGE_CENTS[chargeCurrency] || 50;
         if (grossAmountInCents < minChargeInCents) {
@@ -140,28 +129,29 @@ router.post('/create-checkout-session', async (req, res) => {
         }
         
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
-          // --- THIS IS THE FINAL, CORRECTED LOGIC ---
+
+        // --- THIS IS THE FIX ---
+        // We add the missing variable definition right here.
+        const productDescription = `A one-time payment to support ${recipientUser.displayName || recipientUser.username}.`;
+
         const prefix = process.env.STRIPE_STATEMENT_DESCRIPTOR_PREFIX;
         if (!prefix) {
             console.error("CRITICAL: STRIPE_STATEMENT_DESCRIPTOR_PREFIX is not set in environment variables.");
-            // Fallback to a generic descriptor if the prefix is missing
             return res.status(500).json({ message: "Server configuration error." });
         }
-        
-        // Calculate the maximum allowed length for the suffix
-        // Total length (22) - prefix length - 2 (for '*' and ' ')
         const maxSuffixLength = 22 - (prefix.length + 2);
-        
-        // Sanitize username and truncate to the safe, calculated length
         const sanitizedUsername = recipientUser.username.replace(/['"*<>]/g, '');
         const statementDescriptorSuffix = sanitizedUsername.substring(0, maxSuffixLength);
-        // --- END OF FIX ---
+        
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card', 'klarna', 'link'],
             line_items: [{
                 price_data: {
-                    currency: chargeCurrency, // This now correctly uses the user's preference
-                    product_data: { name: productName, description: productDescription },
+                    currency: chargeCurrency,
+                    product_data: { 
+                        name: productName, 
+                        description: productDescription // Now this variable exists
+                    },
                     unit_amount: grossAmountInCents
                 },
                 quantity: 1
