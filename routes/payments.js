@@ -11,7 +11,7 @@ const getPaymentStats = async (userId, currency, dateFilter = {}) => {
   const stats = await prisma.payment.aggregate({
     where: {
       recipientUserId: userId,
-      status: 'succeeded',
+      status: 'SUCCEEDED',
       currency: currency.toLowerCase(),
       ...dateFilter, // Spread the date filter if it exists
     },
@@ -84,7 +84,7 @@ router.get('/history', authMiddleware, async (req, res) => {
   
     try {
       const paymentHistory = await prisma.payment.findMany({
-        where: { recipientUserId: userId, status: 'succeeded' },
+        where: { recipientUserId: userId, status: 'SUCCEEDED' },
         orderBy: {
           createdAt: 'desc', // Show most recent first
         },
