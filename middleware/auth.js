@@ -1,4 +1,4 @@
-// File: backend/middleware/auth.js (Corrected Version)
+// File: backend/middleware/auth.js (Final Corrected Version)
 
 const { createClient } = require('@supabase/supabase-js');
 const prisma = require('../lib/prisma');
@@ -31,7 +31,8 @@ const authMiddleware = async (req, res, next) => {
     req.user = user;
 
     // --- THIS IS THE FIX ---
-    // We are now selecting the new `payoutsInUsd` field and have removed the old `preferredCurrency` field.
+    // The select statement has been updated to only include fields that exist
+    // in your final, cleaned-up schema.prisma file.
     const localUser = await prisma.user.findUnique({
       where: { supabaseAuthId: user.id },
       select: {
@@ -44,17 +45,10 @@ const authMiddleware = async (req, res, next) => {
         profileImageUrl: true,
         bannerImageUrl: true,
         profileBackgroundColor: true,
-        country: true,
-        dobDay: true,
-        dobMonth: true,
-        dobYear: true,
-        firstName: true,
-        lastName: true,
-        phone: true,
-        payoutsInUsd: true, // <-- The new, correct field
+        payoutsInUsd: true,
+        autoInstantPayoutsEnabled: true, // <-- The correct field name
         stripeAccountId: true,
         stripeOnboardingComplete: true,
-        stripeAutoPayoutsEnabled: true,
         stripeAccountCountry: true,
         stripeDefaultCurrency: true,
         createdAt: true,
