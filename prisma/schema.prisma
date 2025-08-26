@@ -1,3 +1,5 @@
+// File: backend/prisma/schema.prisma (Final, Improved Version)
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -7,65 +9,106 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// -----------------------------------------------------------------------------
+// ENUMS - For type safety and data consistency
+// -----------------------------------------------------------------------------
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  CANCELED
+}
+
+// -----------------------------------------------------------------------------
+// MODELS
+// -----------------------------------------------------------------------------
+
 model User {
-  id                       String    @id @default(cuid())
-  supabaseAuthId           String    @unique
-  username                 String    @unique
-  email                    String?   @unique
-  displayName              String?
-  bio                      String?
-  profileImageUrl          String?
-  stripeAccountId          String?   @unique
-  stripeOnboardingComplete Boolean   @default(false)
-  createdAt                DateTime  @default(now())
-  updatedAt                DateTime  @updatedAt
-  bannerImageUrl           String?
-  profileBackgroundColor   String?   @default("#FFFFFF")
-  country                  String?
-  dobDay                   Int?
-  dobMonth                 Int?
-  dobYear                  Int?
-  firstName                String?
-  lastName                 String?
-  phone                    String?
-  stripeAutoPayoutsEnabled Boolean   @default(false)
-  stripeAccountCountry     String?
-  stripeDefaultCurrency    String?
+  /// Core IDs
+  id             String @id @default(cuid())
+  supabaseAuthId String @unique
+
+  /// Basic User Information
+  username    String  @unique
+  email       String? @unique
+  displayName String?
   
-  payoutsInUsd             Boolean   @default(true)
+  /// Profile Customization
+  bio                    String?
+  profileImageUrl        String?
+  bannerImageUrl         String?
+  profileBackgroundColor String? @default("#FFFFFF")
 
-  links                    Link[]
-  paymentsReceived         Payment[] @relation("RecipientPayments")
+  /// Stripe & Payout Information
+  stripeAccountId           String?  @unique
+  stripeAccountCountry      String?
+  stripeDefaultCurrency     String?
+  stripeOnboardingComplete  Boolean  @default(false)
+  payoutsInUsd              Boolean  @default(true)      // User's choice: receive payments in USD
+  autoInstantPayoutsEnabled Boolean  @default(false)     // User's choice: false = Standard, true = Instant
+  
+  // Note: Optional Stripe-related fields like firstName, country, etc., were removed
+  // as they are primarily handled by Stripe's onboarding and not needed in our direct schema.
+  // This keeps the model cleaner.
 
+  /// Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Relations
+  links            Link[]
+  paymentsReceived Payment[] @relation("RecipientPayments")
+
+  /// Indexes
   @@index([supabaseAuthId])
   @@index([username])
 }
 
 model Link {
-  id        String   @id @default(cuid())
-  title     String
-  url       String
-  userId    String
-  order     Int?
-  clicks    Int      @default(0)
+  /// Core Fields
+  id     String @id @default(cuid())
+  title  String
+  url    String
+  order  Int?
+  clicks Int    @default(0)
+
+  /// Relational Fields
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Timestamps
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  /// Indexes
   @@index([userId])
 }
 
 model Payment {
-  id                    String   @id @default(cuid())
-  stripePaymentIntentId String   @unique
-  amount                Int
-  currency              String
-  status                String
-  recipientUserId       String
-  payerEmail            String?
-  platformFee           Int?
-  netAmountToRecipient  Int?
-  createdAt             DateTime @default(now())
-  payerName             String?
-  recipient             User     @relation("RecipientPayments", fields: [recipientUserId], references: [id])
+  /// Core IDs
+  id                    String @id @default(cuid())
+  stripePaymentIntentId String @unique
+
+  /// Payment Details
+  amount               Int
+  currency             String
+  status               PaymentStatus @default(PENDING) // Using the enum for type safety
+  platformFee          Int?
+  netAmountToRecipient Int?
+
+  /// Payer Information
+  payerName  String?
+  payerEmail String?
+
+  /// Relational Fields
+  recipientUserId String
+  recipient       User   @relation("RecipientPayments", fields: [recipientUserId], references: [id], onUpdate: Cascade, onDelete: Restrict)
+
+  /// Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt // Added for tracking status changes
+
+  /// Indexes
+  @@index([recipientUserId])
 }

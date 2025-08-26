@@ -252,53 +252,55 @@ router.post('/payouts/instant', authMiddleware, async (req, res) => {
     }
 });
 
-// 6. TOGGLE AUTOMATIC PAYOUT SETTINGS
-router.post('/payouts/toggle-auto', authMiddleware, async (req, res) => {
+// 6. TOGGLE AUTOMATIC PAYOUT MODE (NEW LOGIC)
+router.post('/payouts/toggle-mode', authMiddleware, async (req, res) => {
     try {
         if (!req.localUser?.stripeAccountId || !req.localUser.stripeOnboardingComplete) {
             return res.status(400).json({ message: "Stripe account not fully set up." });
         }
-        const { autoPayoutsEnabled } = req.body; // Expect a boolean: true or false
-        if (typeof autoPayoutsEnabled !== 'boolean') {
-            return res.status(400).json({ message: "A boolean value for 'autoPayoutsEnabled' is required." });
+        
+        const { instantPayoutsEnabled } = req.body; // Expects a boolean
+        if (typeof instantPayoutsEnabled !== 'boolean') {
+            return res.status(400).json({ message: "A boolean value for 'instantPayoutsEnabled' is required." });
         }
 
         const user = req.localUser;
         const stripeAccountId = user.stripeAccountId;
 
-        console.log(`[Toggle Auto Payouts] Setting auto payouts for ${stripeAccountId} to ${autoPayoutsEnabled}`);
+        // 'true' (Instant Mode): We take over, so Stripe's schedule should be manual.
+        // 'false' (Standard Mode): We want Stripe to handle it, so set the schedule to daily.
+        const stripeInterval = instantPayoutsEnabled ? 'manual' : 'daily';
 
-        // Update the account's payout schedule on Stripe
         await stripe.accounts.update(stripeAccountId, {
             settings: {
                 payouts: {
                     schedule: {
-                        // If enabled, set to daily automatic. If disabled, set to manual.
-                        interval: autoPayoutsEnabled ? 'daily' : 'manual',
-                        // You could also offer 'weekly' or 'monthly' options
+                        interval: stripeInterval,
                     }
                 }
             }
         });
 
-        // Update the preference in your own database
         const updatedUser = await prisma.user.update({
             where: { id: user.id },
-            data: { stripeAutoPayoutsEnabled: autoPayoutsEnabled },
+            data: { autoInstantPayoutsEnabled: instantPayoutsEnabled },
         });
+
+        const message = instantPayoutsEnabled 
+            ? "Automatic Instant Payouts enabled." 
+            : "Automatic Standard Payouts enabled.";
 
         res.json({ 
             success: true, 
-            message: `Automatic payouts have been ${autoPayoutsEnabled ? 'enabled' : 'disabled'}.`,
-            stripeAutoPayoutsEnabled: updatedUser.stripeAutoPayoutsEnabled
+            message: message,
+            autoInstantPayoutsEnabled: updatedUser.autoInstantPayoutsEnabled
         });
 
     } catch (error) {
-        console.error("[/payouts/toggle-auto] Error:", error);
+        console.error("[/payouts/toggle-mode] Error:", error);
         res.status(500).json({ message: error.message || "Failed to update payout settings." });
     }
 });
-
 // 7. GET STRIPE CONNECT ACCOUNT BALANCE
 router.get('/balance', authMiddleware, async (req, res) => {
     try {

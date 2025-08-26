@@ -88,6 +88,37 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                 }
             }
             break;
+            
+        case 'balance.available':
+            const balance = event.data.object;
+            const stripeAccountId = event.account; // The ID of the connected account
+
+            try {
+                const user = await prisma.user.findFirst({
+                    where: { stripeAccountId: stripeAccountId },
+                });
+
+                // Check if the user exists and has this feature enabled
+                if (user && user.autoInstantPayoutsEnabled) {
+                    const availableBalance = balance.available.find(b => b.currency === user.stripeDefaultCurrency);
+                    
+                    if (availableBalance && availableBalance.amount > 0) {
+                        console.log(`[Webhook] Auto-Instant Payout triggered for ${stripeAccountId}. Amount: ${availableBalance.amount}`);
+                        // Trigger an instant payout for the entire available balance
+                        await stripe.payouts.create({
+                            amount: availableBalance.amount,
+                            currency: availableBalance.currency,
+                            method: 'instant',
+                        }, {
+                            stripeAccount: stripeAccountId,
+                        });
+                    }
+                }
+            } catch (payoutError) {
+                console.error(`[Webhook] FAILED to process auto-instant payout for ${stripeAccountId}:`, payoutError.message);
+            }
+            break;
+
         case 'account.updated':
             const account = event.data.object;
             try {
