@@ -38,7 +38,7 @@ model User {
   bio                    String?
   profileImageUrl        String?
   bannerImageUrl         String?
-  profileBackgroundColor String? @default("#FFFFFF")
+  profileBackgroundColor String? @default("#111827") // Changed from #FFFFFF
 
   /// Stripe & Payout Information
   stripeAccountId           String?  @unique
