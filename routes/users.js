@@ -40,7 +40,7 @@ router.get('/me', authMiddleware, async (req, res) => {
 
 
 // POST Create or Update user's application profile
-// This route is now more flexible and allows for partial updates.
+// --- THIS IS THE FIX ---
 router.post('/profile', authMiddleware, async (req, res) => {
   const {
     username,
@@ -49,15 +49,16 @@ router.post('/profile', authMiddleware, async (req, res) => {
     profileImageUrl,
     bannerImageUrl,
     profileBackgroundColor,
-    payoutsInUsd // Added for currency updates
+    payoutsInUsd
   } = req.body;
 
   if (!req.user || !req.user.id) {
     return res.status(401).json({ message: "Authentication error: Supabase user ID missing." });
   }
   const supabaseAuthId = req.user.id;
-  
-  // --- FIX: Only validate username IF it is provided in the request body ---
+  const email = req.user.email; // Get email from the authenticated Supabase user
+
+  // Username validation remains the same
   if (username !== undefined) {
     if (typeof username !== 'string' || username.trim() === '') {
       return res.status(400).json({ message: "Username cannot be empty." });
@@ -66,23 +67,26 @@ router.post('/profile', authMiddleware, async (req, res) => {
     if (!/^[a-zA-Z0-9_.-]{3,20}$/.test(trimmedUsername)) {
       return res.status(400).json({ message: "Username must be 3-20 characters (letters, numbers, _, ., -)." });
     }
-
     const existingUserByUsername = await prisma.user.findFirst({
       where: {
         username: { equals: trimmedUsername, mode: 'insensitive' },
         NOT: { supabaseAuthId: supabaseAuthId }
       },
     });
-
     if (existingUserByUsername) {
       return res.status(409).json({ message: "Username is already taken by another user." });
+    }
+  } else {
+    // If it's a new user, username MUST be provided
+    const existingProfile = await prisma.user.findUnique({ where: { supabaseAuthId }});
+    if (!existingProfile) {
+        return res.status(400).json({ message: "A username is required to create your profile." });
     }
   }
 
   try {
     const profileData = {
-      // Use trimmed username only if it was provided, otherwise it remains undefined and is ignored by Prisma
-      username: username !== undefined ? username.trim() : undefined,
+      username: username?.trim(),
       displayName,
       bio,
       profileImageUrl,
@@ -91,24 +95,25 @@ router.post('/profile', authMiddleware, async (req, res) => {
       payoutsInUsd
     };
 
-    // Use `update` instead of `upsert`. `upsert` is for "create if not exist," 
-    // but the /me route and auth middleware should handle profile creation logic.
-    const updatedUser = await prisma.user.update({
+    // Use `upsert` instead of `update`
+    const userProfile = await prisma.user.upsert({
       where: { supabaseAuthId: supabaseAuthId },
-      data: profileData,
+      update: profileData, // Data for updating an existing profile
+      create: {          // Data for creating a new profile
+        supabaseAuthId: supabaseAuthId,
+        email: email,
+        ...profileData, // Spread the rest of the profile data
+      },
     });
 
-    res.status(200).json(updatedUser);
+    res.status(200).json(userProfile);
 
   } catch (error) {
     console.error(`POST /api/users/profile error for Supabase user ${supabaseAuthId}:`, error);
     if (error.code === 'P2002' && error.meta?.target?.includes('username')) {
-      return res.status(409).json({ message: "This username is already registered (database constraint)." });
+      return res.status(409).json({ message: "This username is already registered." });
     }
-    // Handle case where user might not exist yet if using `update` strictly
-    if (error.code === 'P2025') {
-       return res.status(404).json({ message: "User profile not found to update." });
-    }
+    // The 'P2025' error will no longer happen because of upsert
     res.status(500).json({ message: "An error occurred while saving the profile.", error: error.message });
   }
 });
