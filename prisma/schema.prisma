@@ -1,5 +1,3 @@
-// File: backend/prisma/schema.prisma (Final, Improved Version)
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -22,6 +20,14 @@ enum PaymentStatus {
   DISPUTED
 }
 
+// --- NEW ---
+enum PayoutStatus {
+  PENDING
+  PAID
+  FAILED
+  CANCELED
+}
+
 // -----------------------------------------------------------------------------
 // MODELS
 // -----------------------------------------------------------------------------
@@ -40,20 +46,16 @@ model User {
   bio                    String?
   profileImageUrl        String?
   bannerImageUrl         String?
-  profileBackgroundColor String? @default("#111827") // Changed from #FFFFFF
+  profileBackgroundColor String? @default("#111827")
 
   /// Stripe & Payout Information
   stripeAccountId           String?  @unique
   stripeAccountCountry      String?
   stripeDefaultCurrency     String?
   stripeOnboardingComplete  Boolean  @default(false)
-  payoutsInUsd              Boolean  @default(true)      // User's choice: receive payments in USD
-  autoInstantPayoutsEnabled Boolean  @default(false)     // User's choice: false = Standard, true = Instant
+  payoutsInUsd              Boolean  @default(true)
+  autoInstantPayoutsEnabled Boolean  @default(false)
   
-  // Note: Optional Stripe-related fields like firstName, country, etc., were removed
-  // as they are primarily handled by Stripe's onboarding and not needed in our direct schema.
-  // This keeps the model cleaner.
-
   /// Timestamps
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -61,6 +63,7 @@ model User {
   /// Relations
   links            Link[]
   paymentsReceived Payment[] @relation("RecipientPayments")
+  payouts          Payout[] 
 
   /// Indexes
   @@index([supabaseAuthId])
@@ -95,7 +98,7 @@ model Payment {
   /// Payment Details
   amount               Int
   currency             String
-  status               PaymentStatus @default(PENDING) // Using the enum for type safety
+  status               PaymentStatus @default(PENDING)
   platformFee          Int?
   netAmountToRecipient Int?
 
@@ -109,8 +112,29 @@ model Payment {
 
   /// Timestamps
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt // Added for tracking status changes
+  updatedAt DateTime @updatedAt
 
   /// Indexes
   @@index([recipientUserId])
+}
+
+model Payout {
+  id              String       @id @default(cuid())
+  stripePayoutId  String       @unique
+  amount          Int
+  currency        String
+  status          PayoutStatus @default(PENDING)
+  arrivalDate     DateTime?
+  failureReason   String?
+
+  /// Relational Fields
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Indexes
+  @@index([userId])
 }
