@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const prisma = require('../lib/prisma');
+// Initialize its own Stripe instance
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 // GET /api/public/stripe-supported-countries
 router.get('/stripe-supported-countries', async (req, res) => {
@@ -12,9 +14,9 @@ router.get('/stripe-supported-countries', async (req, res) => {
     }
     
     // Initialize Stripe directly inside the handler for maximum reliability
-    const stripe = require('stripe')(secretKey);
+    const localStripe = require('stripe')(secretKey);
 
-    const countries = await stripe.countries.list({ limit: 100 });
+    const countries = await localStripe.countries.list({ limit: 100 });
     
     const displayNames = new Intl.DisplayNames(['en'], { type: 'country' });
     
@@ -65,6 +67,4 @@ router.get('/profile/:username', async (req, res) => {
   }
 });
 
-// --- THIS IS THE FIX ---
-// Ensure we are exporting the router object correctly.
 module.exports = router;

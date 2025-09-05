@@ -263,6 +263,4 @@ const formatCurrency = (cents, currency = 'USD') => {
     return new Intl.NumberFormat(undefined, { style: 'currency', currency: currency.toUpperCase() }).format(cents / 100);
 };
 
-// --- EXPORTS ---
-// We no longer export a webhook handler from here.
 module.exports = router;
