@@ -18,6 +18,8 @@ enum PaymentStatus {
   SUCCEEDED
   FAILED
   CANCELED
+  REFUNDED
+  DISPUTED
 }
 
 // -----------------------------------------------------------------------------
