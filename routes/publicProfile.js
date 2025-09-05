@@ -1,15 +1,31 @@
 const express = require('express');
 const router = express.Router();
 const prisma = require('../lib/prisma');
-// Initialize Stripe in this file to avoid module conflicts
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+// We will only require the main library here
+const Stripe = require('stripe');
 
 // GET /api/public/stripe-supported-countries
 router.get('/stripe-supported-countries', async (req, res) => {
   try {
-    // Defensive check to ensure the Stripe object is valid
+    const secretKey = process.env.STRIPE_SECRET_KEY;
+    if (!secretKey) {
+        console.error("!!! CRITICAL ERROR: STRIPE_SECRET_KEY is NOT DEFINED inside the route handler. !!!");
+        throw new Error("Stripe secret key is not configured on the server.");
+    }
+    
+    // --- FINAL ATTEMPT ---
+    // Initialize Stripe with the full appInfo block.
+    const stripe = new Stripe(secretKey, {
+        apiVersion: '2023-10-16', // It's good practice to pin this
+        appInfo: {
+            name: 'TributeToro Staging', // Be explicit for debugging
+            version: '1.0.0',
+            url: process.env.FRONTEND_URL || 'https://tributetoro.com'
+        }
+    });
+
     if (!stripe || typeof stripe.countries === 'undefined') {
-        console.error("!!! CRITICAL FAILURE: Stripe instance is malformed on server start. Check STRIPE_SECRET_KEY. !!!");
+        console.error("!!! CRITICAL FAILURE: Stripe instance is malformed EVEN WITH appInfo. !!!");
         throw new Error("Stripe client failed to initialize on the server.");
     }
     
