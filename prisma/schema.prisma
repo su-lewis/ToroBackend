@@ -138,3 +138,19 @@ model Payout {
   /// Indexes
   @@index([userId])
 }
+
+model FailedPaymentAttempt {
+  id              String   @id @default(cuid())
+  stripePiId      String   @unique // Payment Intent ID
+  amount          Int
+  currency        String
+  recipientUserId String
+  failureCode     String?  // e.g., 'card_declined'
+  failureMessage  String?
+
+  createdAt       DateTime @default(now())
+
+  // Note: We don't link this to a User model to keep it simple,
+  // but you could add a relation if you wanted to analyze per-user failures.
+  @@index([recipientUserId])
+}
