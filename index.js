@@ -88,7 +88,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                 }
             }
             break;
-            
+
         case 'charge.refunded':
             const refund = event.data.object;
             const paymentIntentIdForRefund = refund.payment_intent;
@@ -110,7 +110,6 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
             }
             break;
             
-        // --- NEW: Handle Disputes ---
         case 'charge.dispute.created':
             const dispute = event.data.object;
             const paymentIntentIdForDispute = dispute.payment_intent;
@@ -131,6 +130,72 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
             }
             break;
 
+        case 'charge.dispute.closed':
+            const closedDispute = event.data.object;
+            const paymentIntentIdForClosedDispute = closedDispute.payment_intent;
+            
+            if (closedDispute.status === 'won') {
+                console.log(`[Webhook] Dispute WON for PI: ${paymentIntentIdForClosedDispute}.`);
+                try {
+                    await prisma.payment.update({
+                        where: { stripePaymentIntentId: paymentIntentIdForClosedDispute },
+                        data: { status: 'SUCCEEDED' }, // Revert status to SUCCEEDED
+                    });
+                } catch (err) { console.error(`[Webhook] DB Error reverting dispute status for PI ${paymentIntentIdForClosedDispute}:`, err); }
+            } else { // status is 'lost' or 'warning_closed'
+                console.log(`[Webhook] Dispute LOST for PI: ${paymentIntentIdForClosedDispute}.`);
+                try {
+                    await prisma.payment.update({
+                        where: { stripePaymentIntentId: paymentIntentIdForClosedDispute },
+                        data: { status: 'FAILED' }, // The payment is ultimately failed
+                    });
+                } catch (err) { console.error(`[Webhook] DB Error updating lost dispute status for PI ${paymentIntentIdForClosedDispute}:`, err); }
+            }
+            break;
+
+        case 'payout.paid':
+            const paidPayout = event.data.object;
+            const stripeAccountIdForPaidPayout = event.account; // Get the connected account ID
+            try {
+                const user = await prisma.user.findFirst({ where: { stripeAccountId: stripeAccountIdForPaidPayout }});
+                if (user) {
+                    await prisma.payout.create({
+                        data: {
+                            stripePayoutId: paidPayout.id,
+                            amount: paidPayout.amount,
+                            currency: paidPayout.currency,
+                            status: 'PAID',
+                            arrivalDate: new Date(paidPayout.arrival_date * 1000), // Convert from UNIX timestamp
+                            userId: user.id,
+                        }
+                    });
+                    console.log(`[Webhook] Recorded successful payout ${paidPayout.id} for user ${user.id}`);
+                }
+            } catch (err) { console.error(`[Webhook] DB Error creating Payout record for ${paidPayout.id}:`, err); }
+            break;
+
+        case 'payout.failed':
+            const failedPayout = event.data.object;
+            const stripeAccountIdForFailedPayout = event.account;
+             try {
+                const user = await prisma.user.findFirst({ where: { stripeAccountId: stripeAccountIdForFailedPayout }});
+                if (user) {
+                    await prisma.payout.create({
+                        data: {
+                            stripePayoutId: failedPayout.id,
+                            amount: failedPayout.amount,
+                            currency: failedPayout.currency,
+                            status: 'FAILED',
+                            failureReason: failedPayout.failure_message,
+                            userId: user.id,
+                        }
+                    });
+                    console.log(`[Webhook] Recorded FAILED payout ${failedPayout.id} for user ${user.id}`);
+                    // TODO: Trigger a high-priority email to the user here!
+                }
+            } catch (err) { console.error(`[Webhook] DB Error creating FAILED Payout record for ${failedPayout.id}:`, err); }
+            break;
+            
         case 'balance.available':
             const balance = event.data.object;
             const stripeAccountId = event.account; // The ID of the connected account
