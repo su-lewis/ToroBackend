@@ -1,13 +1,16 @@
 const express = require('express');
 const router = express.Router();
-const stripe = require('../lib/stripe'); // Import the shared Stripe instance
+// Initialize its own Stripe instance
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY, {
+    apiVersion: '2023-10-16',
+});
 const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
 
 // --- Constants for payment logic ---
-const PLATFORM_FEE_PERCENTAGE = 0.15; // 15% platform fee
-const PLATFORM_FEE_FIXED_CENTS = 100; // $1.00 in cents
-const MINIMUM_SEND_AMOUNT_USD_EQUIVALENT = 5.00; // The minimum amount a user can send, in USD equivalent.
+const PLATFORM_FEE_PERCENTAGE = 0.15;
+const PLATFORM_FEE_FIXED_CENTS = 100;
+const MINIMUM_SEND_AMOUNT_USD_EQUIVALENT = 5.00;
 
 // --- API ROUTES ---
 
@@ -186,48 +189,27 @@ router.post('/payouts/instant', authMiddleware, async (req, res) => {
         }
         const user = req.localUser;
         const stripeAccountId = user.stripeAccountId;
-
-        // Get the available balance for the connected account
-        const balance = await stripe.balance.retrieve({
-            stripeAccount: stripeAccountId,
-        });
-
-        // Find their main currency balance
+        const balance = await stripe.balance.retrieve({ stripeAccount: stripeAccountId });
         const connectedAccount = await stripe.accounts.retrieve(stripeAccountId);
         const defaultCurrency = connectedAccount.default_currency;
         const availableBalance = balance.available.find(b => b.currency === defaultCurrency);
-
         if (!availableBalance || availableBalance.amount <= 0) {
             return res.status(400).json({ message: "No available balance for an instant payout." });
         }
-
-        console.log(`[Payout Now] Initiating instant payout of ${availableBalance.amount} ${defaultCurrency.toUpperCase()} for ${stripeAccountId}`);
-
-        // Create the instant payout on behalf of the connected account
         const payout = await stripe.payouts.create({
             amount: availableBalance.amount,
             currency: defaultCurrency,
             method: 'instant',
-        }, {
-            stripeAccount: stripeAccountId, // This header makes the API call on behalf of the connected account
-        });
-
+        }, { stripeAccount: stripeAccountId });
         res.json({ success: true, message: `Instant payout of ${formatCurrency(payout.amount, payout.currency)} initiated.`, payoutId: payout.id });
-
     } catch (error) {
         console.error("[/payouts/instant] Stripe Payout Error:", error);
-        let userMessage = "Failed to initiate instant payout. Please try again later.";
+        let userMessage = "Failed to initiate instant payout.";
         if (error.type === 'StripeInvalidRequestError') {
-            // These are common, actionable errors for the user.
-            if (error.code === 'balance_insufficient') {
-                userMessage = "Your available balance is insufficient for a payout.";
-            } else if (error.code === 'instant_payouts_unsupported') {
-                userMessage = "Instant Payouts are not supported for your bank account country.";
-            } else if (error.code === 'payouts_not_allowed') {
-                userMessage = "Payouts are currently disabled on your account. Please check your Stripe dashboard.";
-            } else {
-                userMessage = "Could not process payout. Please ensure you have an eligible debit card on file with Stripe for Instant Payouts.";
-            }
+            if (error.code === 'balance_insufficient') userMessage = "Your available balance is insufficient for a payout.";
+            else if (error.code === 'instant_payouts_unsupported') userMessage = "Instant Payouts are not supported for your bank account country.";
+            else if (error.code === 'payouts_not_allowed') userMessage = "Payouts are currently disabled on your account. Please check your Stripe dashboard.";
+            else userMessage = "Could not process payout. Please ensure you have an eligible debit card on file with Stripe for Instant Payouts.";
         }
         res.status(400).json({ message: userMessage, error: error.message });
     }
@@ -239,49 +221,28 @@ router.post('/payouts/toggle-mode', authMiddleware, async (req, res) => {
         if (!req.localUser?.stripeAccountId || !req.localUser.stripeOnboardingComplete) {
             return res.status(400).json({ message: "Stripe account not fully set up." });
         }
-        
-        const { instantPayoutsEnabled } = req.body; // Expects a boolean
+        const { instantPayoutsEnabled } = req.body;
         if (typeof instantPayoutsEnabled !== 'boolean') {
             return res.status(400).json({ message: "A boolean value for 'instantPayoutsEnabled' is required." });
         }
-
         const user = req.localUser;
         const stripeAccountId = user.stripeAccountId;
-
-        // 'true' (Instant Mode): We take over, so Stripe's schedule should be manual.
-        // 'false' (Standard Mode): We want Stripe to handle it, so set the schedule to daily.
         const stripeInterval = instantPayoutsEnabled ? 'manual' : 'daily';
-
         await stripe.accounts.update(stripeAccountId, {
-            settings: {
-                payouts: {
-                    schedule: {
-                        interval: stripeInterval,
-                    }
-                }
-            }
+            settings: { payouts: { schedule: { interval: stripeInterval } } }
         });
-
         const updatedUser = await prisma.user.update({
             where: { id: user.id },
             data: { autoInstantPayoutsEnabled: instantPayoutsEnabled },
         });
-
-        const message = instantPayoutsEnabled 
-            ? "Automatic Instant Payouts enabled." 
-            : "Automatic Standard Payouts enabled.";
-
-        res.json({ 
-            success: true, 
-            message: message,
-            autoInstantPayoutsEnabled: updatedUser.autoInstantPayoutsEnabled
-        });
-
+        const message = instantPayoutsEnabled ? "Automatic Instant Payouts enabled." : "Automatic Standard Payouts enabled.";
+        res.json({ success: true, message: message, autoInstantPayoutsEnabled: updatedUser.autoInstantPayoutsEnabled });
     } catch (error) {
         console.error("[/payouts/toggle-mode] Error:", error);
         res.status(500).json({ message: error.message || "Failed to update payout settings." });
     }
 });
+
 // 7. GET STRIPE CONNECT ACCOUNT BALANCE
 router.get('/balance', authMiddleware, async (req, res) => {
     try {
@@ -289,11 +250,7 @@ router.get('/balance', authMiddleware, async (req, res) => {
             return res.status(404).json({ message: "Stripe account not fully set up." });
         }
         const stripeAccountId = req.localUser.stripeAccountId;
-
-        const balance = await stripe.balance.retrieve({
-            stripeAccount: stripeAccountId,
-        });
-
+        const balance = await stripe.balance.retrieve({ stripeAccount: stripeAccountId });
         res.json(balance);
     } catch (error) {
         console.error('[/stripe/balance] Error fetching Stripe balance:', error);
@@ -301,188 +258,11 @@ router.get('/balance', authMiddleware, async (req, res) => {
     }
 });
 
-// --- CORRECTED HELPER FUNCTION ---
+// --- HELPER FUNCTION ---
 const formatCurrency = (cents, currency = 'USD') => {
-    // The key change is removing 'en-US' from the constructor.
-    // This allows the constructor to use the correct symbol for the provided currency code.
-    return new Intl.NumberFormat(undefined, { 
-        style: 'currency', 
-        currency: currency.toUpperCase() 
-    }).format(cents / 100);
-};
-
-// --- WEBHOOK HANDLER ---
-const handleWebhook = async (req, res) => {
-    const sig = req.headers['stripe-signature'];
-    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-    if (!webhookSecret) {
-        console.error("FATAL: STRIPE_WEBHOOK_SECRET env var is not set.");
-        return res.status(500).send("Webhook secret not configured.");
-    }
-    let event;
-    try {
-        event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
-    } catch (err) {
-        console.error(`[Webhook] Signature verification failed: ${err.message}`);
-        return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    console.log(`[Webhook] Event received and verified: ${event.type}, ID: ${event.id}`);
-    // This is the entire switch statement moved from index.js
-    switch (event.type) {
-        case 'checkout.session.completed': {
-            const session = event.data.object;
-            if (session.payment_status === 'paid') {
-                const metadata = session.metadata;
-                const paymentIntentId = session.payment_intent;
-                const appRecipientUserId = metadata?.appRecipientUserId;
-                const intendedAmountForCreator = parseInt(metadata?.intendedAmountForCreator, 10);
-                const grossAmountChargedToDonor = parseInt(metadata?.grossAmountChargedToDonor, 10);
-                if (paymentIntentId && appRecipientUserId && !isNaN(intendedAmountForCreator)) {
-                    const existingPayment = await prisma.payment.findUnique({ where: { stripePaymentIntentId: paymentIntentId } });
-                    if (!existingPayment) {
-                        await prisma.payment.create({
-                            data: {
-                                stripePaymentIntentId: paymentIntentId,
-                                amount: grossAmountChargedToDonor,
-                                currency: session.currency.toLowerCase(),
-                                status: 'SUCCEEDED',
-                                recipientUserId: appRecipientUserId,
-                                payerEmail: session.customer_details?.email,
-                                platformFee: grossAmountChargedToDonor - intendedAmountForCreator,
-                                netAmountToRecipient: intendedAmountForCreator,
-                                payerName: metadata.donorName || 'Anonymous',
-                            },
-                        });
-                    }
-                }
-            }
-            break;
-        }
-        case 'payment_intent.succeeded': {
-            const paymentIntent = event.data.object;
-            const metadata = paymentIntent.metadata;
-            const appRecipientUserId = metadata?.appRecipientUserId;
-            const intendedAmountForCreator = parseInt(metadata?.intendedAmountForCreator, 10);
-            const grossAmountChargedToDonor = parseInt(metadata?.grossAmountChargedToDonor, 10);
-            if (paymentIntent.id && appRecipientUserId && !isNaN(intendedAmountForCreator)) {
-                const existingPayment = await prisma.payment.findUnique({ where: { stripePaymentIntentId: paymentIntent.id } });
-                if (!existingPayment) {
-                    await prisma.payment.create({
-                        data: {
-                            stripePaymentIntentId: paymentIntent.id,
-                            amount: grossAmountChargedToDonor,
-                            currency: paymentIntent.currency.toLowerCase(),
-                            status: 'SUCCEEDED',
-                            recipientUserId: appRecipientUserId,
-                            platformFee: grossAmountChargedToDonor - intendedAmountForCreator,
-                            netAmountToRecipient: intendedAmountForCreator,
-                            payerName: metadata.donorName || 'Anonymous',
-                        },
-                    });
-                }
-            }
-            break;
-        }
-        case 'payment_intent.payment_failed': {
-            const failedPI = event.data.object;
-            await prisma.failedPaymentAttempt.create({
-                data: {
-                    stripePiId: failedPI.id,
-                    amount: failedPI.amount,
-                    currency: failedPI.currency,
-                    recipientUserId: failedPI.metadata.appRecipientUserId || 'unknown',
-                    failureCode: failedPI.last_payment_error?.code,
-                    failureMessage: failedPI.last_payment_error?.message,
-                }
-            }).catch(err => console.error(`[Webhook] DB Error logging failed payment:`, err));
-            break;
-        }
-        case 'charge.refunded': {
-            const refund = event.data.object;
-            await prisma.payment.update({
-                where: { stripePaymentIntentId: refund.payment_intent },
-                data: { status: 'REFUNDED' },
-            }).catch(err => console.error(`[Webhook] DB Error on charge.refunded:`, err));
-            break;
-        }
-        case 'charge.dispute.created': {
-            const dispute = event.data.object;
-            await prisma.payment.update({
-                where: { stripePaymentIntentId: dispute.payment_intent },
-                data: { status: 'DISPUTED' },
-            }).catch(err => console.error(`[Webhook] DB Error on charge.dispute.created:`, err));
-            break;
-        }
-        case 'charge.dispute.closed': {
-            const closedDispute = event.data.object;
-            const newStatus = closedDispute.status === 'won' ? 'SUCCEEDED' : 'FAILED';
-            await prisma.payment.update({
-                where: { stripePaymentIntentId: closedDispute.payment_intent },
-                data: { status: newStatus },
-            }).catch(err => console.error(`[Webhook] DB Error on charge.dispute.closed:`, err));
-            break;
-        }
-        case 'payout.paid': {
-            const payout = event.data.object;
-            const user = await prisma.user.findFirst({ where: { stripeAccountId: event.account }});
-            if (user) {
-                await prisma.payout.create({
-                    data: {
-                        stripePayoutId: payout.id, amount: payout.amount, currency: payout.currency,
-                        status: 'PAID', arrivalDate: new Date(payout.arrival_date * 1000), userId: user.id,
-                    }
-                }).catch(err => console.error(`[Webhook] DB Error on payout.paid:`, err));
-            }
-            break;
-        }
-        case 'payout.failed': {
-            const payout = event.data.object;
-            const user = await prisma.user.findFirst({ where: { stripeAccountId: event.account }});
-            if (user) {
-                await prisma.payout.create({
-                    data: {
-                        stripePayoutId: payout.id, amount: payout.amount, currency: payout.currency,
-                        status: 'FAILED', failureReason: payout.failure_message, userId: user.id,
-                    }
-                }).catch(err => console.error(`[Webhook] DB Error on payout.failed:`, err));
-            }
-            break;
-        }
-        case 'balance.available': {
-            const stripeAccountId = event.account;
-            const user = await prisma.user.findFirst({ where: { stripeAccountId } });
-            if (user && user.autoInstantPayoutsEnabled) {
-                const balance = event.data.object;
-                const availableBalance = balance.available.find(b => b.currency === user.stripeDefaultCurrency);
-                if (availableBalance && availableBalance.amount > 0) {
-                    await stripe.payouts.create({
-                        amount: availableBalance.amount,
-                        currency: availableBalance.currency,
-                        method: 'instant',
-                    }, { stripeAccount: stripeAccountId })
-                    .catch(payoutError => console.error(`[Webhook] Auto-payout failed for ${stripeAccountId}:`, payoutError.message));
-                }
-            }
-            break;
-        }
-        case 'account.updated': {
-            const account = event.data.object;
-            const userToUpdate = await prisma.user.findFirst({ where: { stripeAccountId: account.id } });
-            if (userToUpdate) {
-                const onboardingComplete = !!(account.charges_enabled && account.details_submitted && account.payouts_enabled);
-                if (userToUpdate.stripeOnboardingComplete !== onboardingComplete) {
-                    await prisma.user.update({ where: { id: userToUpdate.id }, data: { stripeOnboardingComplete }});
-                }
-            }
-            break;
-        }
-    }
-    res.status(200).json({ received: true });
+    return new Intl.NumberFormat(undefined, { style: 'currency', currency: currency.toUpperCase() }).format(cents / 100);
 };
 
 // --- EXPORTS ---
-module.exports = {
-    router: router,
-    handleWebhook: handleWebhook,
-};
+// We no longer export a webhook handler from here.
+module.exports = router;

@@ -1,9 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const prisma = require('../lib/prisma');
-const stripe = require('../lib/stripe'); 
-
-console.log('[DIAGNOSTIC] publicProfile.js: Imported stripe object. typeof stripe.countries:', typeof stripe.countries);
+// Initialize its own Stripe instance
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 // GET /api/public/stripe-supported-countries
 router.get('/stripe-supported-countries', async (req, res) => {
@@ -21,7 +20,7 @@ router.get('/stripe-supported-countries', async (req, res) => {
     res.json(supportedCountries);
   } catch (error) {
     console.error("Error fetching Stripe supported countries:", error);
-    res.status(500).json({ message: 'Error fetching supported countries' });
+    res.status(500).json({ message: 'Error fetching supported countries', error: error.message });
   }
 });
 
@@ -31,25 +30,21 @@ router.get('/profile/:username', async (req, res) => {
   try {
     const user = await prisma.user.findUnique({
       where: { username: username },
-      select: { // Only select public fields
+      select: {
         id: true,
         username: true,
         displayName: true,
         bio: true,
         profileImageUrl: true,
-		bannerImageUrl: true,
-     profileBackgroundColor: true,
-        stripeAccountId: true, // For frontend to know if payments can be made
-        stripeOnboardingComplete: true, // For frontend logic
+		    bannerImageUrl: true,
+        profileBackgroundColor: true,
+        stripeAccountId: true,
+        stripeOnboardingComplete: true,
         payoutsInUsd: true,           
-        stripeDefaultCurrency: true,  // <-- The creator's native currency
+        stripeDefaultCurrency: true,
         links: {
           orderBy: { order: 'asc' },
-          select: {
-            id: true,
-            title: true,
-            url: true,
-          }
+          select: { id: true, title: true, url: true }
         }
       }
     });
