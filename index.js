@@ -3,7 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const prisma = require('./lib/prisma');
-const stripe = require('../lib/stripe');
+const stripe = require('./lib/stripe'); 
 
 const app = express();
 const PORT = process.env.PORT || 3001;
