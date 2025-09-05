@@ -1,22 +1,21 @@
 const express = require('express');
+const express = require('express');
 const router = express.Router();
 const prisma = require('../lib/prisma');
-// Initialize its own Stripe instance
+// We still initialize Stripe locally here as it's the most reliable pattern we've found
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 // GET /api/public/stripe-supported-countries
 router.get('/stripe-supported-countries', async (req, res) => {
   try {
-    const secretKey = process.env.STRIPE_SECRET_KEY;
-    if (!secretKey) {
-        console.error("!!! CRITICAL ERROR: STRIPE_SECRET_KEY is NOT DEFINED inside the route handler. !!!");
-        throw new Error("Stripe secret key is not configured on the server.");
+    // --- ULTRA-DEFENSIVE CHECK ---
+    if (!stripe || typeof stripe.countries === 'undefined') {
+        // This is our custom error. If we see this in the logs, we know the constructor failed.
+        console.error("!!! CRITICAL FAILURE: Stripe instance is malformed. `stripe.countries` is undefined. !!!");
+        throw new Error("Stripe client failed to initialize on the server.");
     }
     
-    // Initialize Stripe directly inside the handler for maximum reliability
-    const localStripe = require('stripe')(secretKey);
-
-    const countries = await localStripe.countries.list({ limit: 100 });
+    const countries = await stripe.countries.list({ limit: 100 });
     
     const displayNames = new Intl.DisplayNames(['en'], { type: 'country' });
     
@@ -28,7 +27,8 @@ router.get('/stripe-supported-countries', async (req, res) => {
     res.json(supportedCountries);
   } catch (error) {
     console.error("Error fetching Stripe supported countries:", error);
-    res.status(500).json({ message: 'Error fetching supported countries', error: error.message });
+    // Send back the specific error message
+    res.status(500).json({ message: error.message || 'Error fetching supported countries' });
   }
 });
 
