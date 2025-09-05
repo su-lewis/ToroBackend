@@ -14,8 +14,15 @@ const MINIMUM_SEND_AMOUNT_USD_EQUIVALENT = 5.00; // The minimum amount a user ca
 
 // 1. Create Stripe Connect Account and Onboarding Link
 // (This route's logic is fine and doesn't need to change, but including for completeness)
+// --- MODIFY THIS ROUTE ---
 router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
     try {
+        // Get the country code from the request body
+        const { country } = req.body;
+        if (!country || !/^[A-Z]{2}$/.test(country)) {
+            return res.status(400).json({ message: 'A valid 2-letter country code is required.' });
+        }
+
         if (!req.localUser?.id) return res.status(403).json({ message: 'Application profile setup required first.' });
         const appUserId = req.localUser.id;
         let appProfile = req.localUser;
@@ -24,22 +31,33 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
         if (!emailForStripe) return res.status(400).json({ message: 'An email address is required to connect with Stripe.' });
         const platformBaseUrl = process.env.FRONTEND_URL;
         if (!platformBaseUrl || !platformBaseUrl.startsWith('http')) return res.status(500).json({ message: 'Server configuration error: A valid FRONTEND_URL is required.' });
+        
         let stripeAccountId = appProfile.stripeAccountId;
         if (!stripeAccountId) {
             const userProfileUrlOnPlatform = `${platformBaseUrl}/${appProfile.username}`;
             const platformDisplayName = process.env.PLATFORM_DISPLAY_NAME || 'Our Platform';
             const productDescriptionOnPlatform = `Receiving support and tips via ${platformDisplayName}.`;
+            
             const accountParams = {
                 type: 'express',
                 email: emailForStripe,
+                country: country, // <-- Use the country code here
                 business_type: 'individual',
                 business_profile: { url: userProfileUrlOnPlatform, mcc: '5815', product_description: productDescriptionOnPlatform, },
                 capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
             };
             const account = await stripe.accounts.create(accountParams);
             stripeAccountId = account.id;
-            await prisma.user.update({ where: { id: appUserId }, data: { stripeAccountId: stripeAccountId, stripeOnboardingComplete: false },});
+            await prisma.user.update({ 
+                where: { id: appUserId }, 
+                data: { 
+                    stripeAccountId: stripeAccountId, 
+                    stripeAccountCountry: country, // <-- Save the country to your DB
+                    stripeOnboardingComplete: false 
+                },
+            });
         }
+        
         const accountLink = await stripe.accountLinks.create({ account: stripeAccountId, refresh_url: `${platformBaseUrl}/connect-stripe?reauth=true`, return_url: `${platformBaseUrl}/connect-stripe?status=success`, type: 'account_onboarding' });
         res.json({ url: accountLink.url });
     } catch (error) {
@@ -47,6 +65,7 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
         res.status(500).json({ message: 'Error creating Stripe onboarding link', error: error.message });
     }
 });
+
 
 // 2. Get Stripe Account Status
 // --- THIS ROUTE IS NOW CORRECTED AND UPDATED ---
