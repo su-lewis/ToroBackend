@@ -45,6 +45,69 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
 
     console.log(`[Webhook] Event received and verified: ${event.type}, ID: ${event.id}`);
     switch (event.type) {
+        case 'payment_intent.succeeded':
+            const paymentIntent = event.data.object;
+            // This logic is almost identical to checkout.session.completed.
+            // It acts as a fallback for maximum reliability.
+            const metadata = paymentIntent.metadata;
+            const appRecipientUserId = metadata?.appRecipientUserId;
+            const intendedAmountForCreator = parseInt(metadata?.intendedAmountForCreator, 10);
+            const grossAmountChargedToDonor = parseInt(metadata?.grossAmountChargedToDonor, 10);
+            
+            if (paymentIntent.id && appRecipientUserId && !isNaN(intendedAmountForCreator) && !isNaN(grossAmountChargedToDonor)) {
+                try {
+                    const existingPayment = await prisma.payment.findUnique({ where: { stripePaymentIntentId: paymentIntent.id } });
+                    if (existingPayment) {
+                        console.log(`[Webhook] Payment ${paymentIntent.id} already recorded from another event.`);
+                    } else {
+                        // We need the donor's name and email, which are on the checkout session.
+                        // For simplicity here, we can fall back to 'Anonymous' or query the session.
+                        // This event is mainly a reliability backup.
+                        await prisma.payment.create({
+                            data: {
+                                stripePaymentIntentId: paymentIntent.id,
+                                amount: grossAmountChargedToDonor,
+                                currency: paymentIntent.currency.toLowerCase(),
+                                status: 'SUCCEEDED', // Use the enum value if you updated it
+                                recipientUserId: appRecipientUserId,
+                                platformFee: grossAmountChargedToDonor - intendedAmountForCreator, 
+                                netAmountToRecipient: intendedAmountForCreator,
+                                payerName: metadata.donorName || 'Anonymous',
+                                // Note: payerEmail is not easily available on this event without an extra API call.
+                            },
+                        });
+                        console.log(`[Webhook] Payment record created from payment_intent.succeeded for PI ${paymentIntent.id}.`);
+                    }
+                } catch (err) {
+                    console.error(`[Webhook] FATAL ERROR during DB op for PI ${paymentIntent.id} from succeeded event:`, err.message);
+                    return res.status(500).json({ error: `Webhook processing failed: ${err.message}` });
+                }
+            } else {
+                console.warn(`[Webhook] Metadata missing on payment_intent.succeeded for PI: ${paymentIntent.id}`);
+            }
+            break;
+
+        case 'payment_intent.payment_failed':
+            const failedPI = event.data.object;
+            const failureMetadata = failedPI.metadata;
+            try {
+                 await prisma.failedPaymentAttempt.create({
+                    data: {
+                        stripePiId: failedPI.id,
+                        amount: failedPI.amount,
+                        currency: failedPI.currency,
+                        recipientUserId: failureMetadata.appRecipientUserId || 'unknown',
+                        failureCode: failedPI.last_payment_error?.code,
+                        failureMessage: failedPI.last_payment_error?.message,
+                    }
+                });
+                console.log(`[Webhook] Logged failed payment attempt for PI: ${failedPI.id}`);
+            } catch (err) {
+                 // Don't crash if logging fails, just report it.
+                 console.error(`[Webhook] DB Error logging failed payment for PI ${failedPI.id}:`, err);
+            }
+            break;
+            
         case 'checkout.session.completed':
             const session = event.data.object;
             if (session.payment_status === 'paid') {
@@ -195,7 +258,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                 }
             } catch (err) { console.error(`[Webhook] DB Error creating FAILED Payout record for ${failedPayout.id}:`, err); }
             break;
-            
+
         case 'balance.available':
             const balance = event.data.object;
             const stripeAccountId = event.account; // The ID of the connected account
