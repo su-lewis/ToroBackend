@@ -89,6 +89,48 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
             }
             break;
             
+        case 'charge.refunded':
+            const refund = event.data.object;
+            const paymentIntentIdForRefund = refund.payment_intent;
+            if (paymentIntentIdForRefund) {
+                console.log(`[Webhook] Charge refunded for PI: ${paymentIntentIdForRefund}.`);
+                try {
+                    await prisma.payment.update({
+                        where: { stripePaymentIntentId: paymentIntentIdForRefund },
+                        data: {
+                            status: 'REFUNDED',
+                            // Your analytics will now correctly ignore this amount
+                        },
+                    });
+                    console.log(`[Webhook] Payment record for ${paymentIntentIdForRefund} updated to REFUNDED.`);
+                } catch (err) {
+                    console.error(`[Webhook] DB Error updating payment to REFUNDED for PI ${paymentIntentIdForRefund}:`, err);
+                    // Still return 200 to Stripe, but log the error for yourself.
+                }
+            }
+            break;
+            
+        // --- NEW: Handle Disputes ---
+        case 'charge.dispute.created':
+            const dispute = event.data.object;
+            const paymentIntentIdForDispute = dispute.payment_intent;
+            if (paymentIntentIdForDispute) {
+                console.log(`[Webhook] Dispute created for PI: ${paymentIntentIdForDispute}.`);
+                try {
+                    await prisma.payment.update({
+                        where: { stripePaymentIntentId: paymentIntentIdForDispute },
+                        data: {
+                            status: 'DISPUTED',
+                        },
+                    });
+                    console.log(`[Webhook] Payment record for ${paymentIntentIdForDispute} updated to DISPUTED.`);
+                    // TODO: Trigger an email notification to the creator here.
+                } catch (err) {
+                    console.error(`[Webhook] DB Error updating payment to DISPUTED for PI ${paymentIntentIdForDispute}:`, err);
+                }
+            }
+            break;
+
         case 'balance.available':
             const balance = event.data.object;
             const stripeAccountId = event.account; // The ID of the connected account
