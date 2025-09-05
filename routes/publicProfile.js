@@ -1,22 +1,20 @@
-// backend/routes/publicProfile.js
 const express = require('express');
 const router = express.Router();
 const prisma = require('../lib/prisma');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const stripe = require('../lib/stripe'); 
 
 // GET /api/public/stripe-supported-countries
 router.get('/stripe-supported-countries', async (req, res) => {
   try {
-    // Fetch all countries from Stripe's API
-    const countries = await stripe.countries.list({ limit: 100 }); // Get up to 100 countries
-
-    // Use Node's built-in Intl API to get the full name for each country code
+    // This will now work because `stripe` and `stripe.countries` are defined
+    const countries = await stripe.countries.list({ limit: 100 });
+    
     const displayNames = new Intl.DisplayNames(['en'], { type: 'country' });
     
     const supportedCountries = countries.data.map(country => ({
-        code: country.id, // e.g., "US"
-        name: displayNames.of(country.id), // e.g., "United States"
-    })).sort((a, b) => a.name.localeCompare(b.name)); // Sort them alphabetically
+        code: country.id,
+        name: displayNames.of(country.id),
+    })).sort((a, b) => a.name.localeCompare(b.name));
 
     res.json(supportedCountries);
   } catch (error) {

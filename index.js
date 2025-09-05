@@ -3,7 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const prisma = require('./lib/prisma');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const stripe = require('../lib/stripe');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -107,7 +107,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                  console.error(`[Webhook] DB Error logging failed payment for PI ${failedPI.id}:`, err);
             }
             break;
-            
+
         case 'checkout.session.completed':
             const session = event.data.object;
             if (session.payment_status === 'paid') {

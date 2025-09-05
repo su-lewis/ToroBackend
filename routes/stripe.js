@@ -1,9 +1,7 @@
 // backend/routes/stripe.js
 const express = require('express');
 const router = express.Router();
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY, {
-    apiVersion: '2023-10-16', // It's good practice to pin the API version
-});
+const stripe = require('../lib/stripe'); 
 const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
 
