@@ -2,24 +2,18 @@ const express = require('express');
 const router = express.Router();
 const prisma = require('../lib/prisma');
 
-// Do NOT initialize Stripe here yet.
-
 // GET /api/public/stripe-supported-countries
 router.get('/stripe-supported-countries', async (req, res) => {
   try {
-    // --- FINAL DIAGNOSTIC ---
     const secretKey = process.env.STRIPE_SECRET_KEY;
     if (!secretKey) {
         console.error("!!! CRITICAL ERROR: STRIPE_SECRET_KEY is NOT DEFINED inside the route handler. !!!");
         throw new Error("Stripe secret key is not configured on the server.");
     }
-    console.log(`[DIAGNOSTIC] Inside /stripe-supported-countries, key starts with: ${secretKey.substring(0, 8)}...`);
     
-    // --- INITIALIZE STRIPE HERE ---
-    // This is the most direct way possible.
+    // Initialize Stripe directly inside the handler for maximum reliability
     const stripe = require('stripe')(secretKey);
 
-    // This line MUST now work.
     const countries = await stripe.countries.list({ limit: 100 });
     
     const displayNames = new Intl.DisplayNames(['en'], { type: 'country' });
@@ -71,4 +65,6 @@ router.get('/profile/:username', async (req, res) => {
   }
 });
 
-module.क्रमe = router;
+// --- THIS IS THE FIX ---
+// Ensure we are exporting the router object correctly.
+module.exports = router;
