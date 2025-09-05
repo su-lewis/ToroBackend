@@ -1,17 +1,15 @@
 const express = require('express');
-const express = require('express');
 const router = express.Router();
 const prisma = require('../lib/prisma');
-// We still initialize Stripe locally here as it's the most reliable pattern we've found
+// Initialize Stripe in this file to avoid module conflicts
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 // GET /api/public/stripe-supported-countries
 router.get('/stripe-supported-countries', async (req, res) => {
   try {
-    // --- ULTRA-DEFENSIVE CHECK ---
+    // Defensive check to ensure the Stripe object is valid
     if (!stripe || typeof stripe.countries === 'undefined') {
-        // This is our custom error. If we see this in the logs, we know the constructor failed.
-        console.error("!!! CRITICAL FAILURE: Stripe instance is malformed. `stripe.countries` is undefined. !!!");
+        console.error("!!! CRITICAL FAILURE: Stripe instance is malformed on server start. Check STRIPE_SECRET_KEY. !!!");
         throw new Error("Stripe client failed to initialize on the server.");
     }
     
@@ -26,8 +24,7 @@ router.get('/stripe-supported-countries', async (req, res) => {
 
     res.json(supportedCountries);
   } catch (error) {
-    console.error("Error fetching Stripe supported countries:", error);
-    // Send back the specific error message
+    console.error("Error fetching Stripe supported countries:", error.message);
     res.status(500).json({ message: error.message || 'Error fetching supported countries' });
   }
 });
