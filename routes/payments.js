@@ -1,9 +1,8 @@
-// backend/routes/payments.js
 const express = require('express');
 const router = express.Router();
 const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
-const { subDays, startOfDay } = require('date-fns'); // npm install date-fns
+const { subDays, startOfDay } = require('date-fns');
 
 // Helper function to abstract the database query for payment stats.
 // This avoids repeating the same aggregation logic.
@@ -27,8 +26,9 @@ const getPaymentStats = async (userId, currency, dateFilter = {}) => {
     giftCount: stats._count.id || 0,
   };
 };
+
 // GET /api/payments/stats - Fetch payment stats for the authenticated user
-// Now accepts query parameters: ?period=7d¤cy=usd
+// Accepts query parameters: ?period=7d&currency=usd
 router.get('/stats', authMiddleware, async (req, res) => {
   if (!req.localUser?.id) {
     return res.status(403).json({ message: 'User profile not found.' });
@@ -40,7 +40,6 @@ router.get('/stats', authMiddleware, async (req, res) => {
   const now = new Date();
 
   // Use a map for a more declarative way to determine the start date.
-  // This is easier to read and extend than a switch statement.
   const periodMap = {
     'today': () => startOfDay(now),
     '7d': () => subDays(now, 7),
@@ -63,7 +62,7 @@ router.get('/stats', authMiddleware, async (req, res) => {
       period: {
         ...periodStatsData,
         currency: currency,
-        timeframe: period, // e.g., '7d', '30d', 'today'
+        timeframe: period,
       },
     };
 
@@ -75,36 +74,79 @@ router.get('/stats', authMiddleware, async (req, res) => {
   }
 });
 
-// GET /api/payments/history - Fetch detailed payment history for the authenticated user
+// GET /api/payments/history - Fetch a unified, chronological list of all transactions (payments and payouts)
 router.get('/history', authMiddleware, async (req, res) => {
     if (!req.localUser?.id) {
       return res.status(403).json({ message: 'User profile not found.' });
     }
     const userId = req.localUser.id;
-  
+
     try {
-      const paymentHistory = await prisma.payment.findMany({
-        where: { recipientUserId: userId, status: 'SUCCEEDED' },
-        orderBy: {
-          createdAt: 'desc', // Show most recent first
-        },
-        select: {
-          id: true,
-          createdAt: true,
-          netAmountToRecipient: true,
-          currency: true,
-          payerName: true,
-        },
-        take: 50, // Limit to the last 50 payments for performance
-      });
-  
-      res.json(paymentHistory);
-  
+        // 1. Fetch recent payments (including non-succeeded ones)
+        const payments = await prisma.payment.findMany({
+            where: { 
+                recipientUserId: userId,
+                status: { in: ['SUCCEEDED', 'REFUNDED', 'DISPUTED'] }
+            },
+            select: {
+                id: true,
+                createdAt: true,
+                status: true,
+                netAmountToRecipient: true,
+                currency: true,
+                payerName: true
+            },
+            orderBy: { createdAt: 'desc' },
+            take: 50,
+        });
+
+        // 2. Fetch recent payouts
+        const payouts = await prisma.payout.findMany({
+            where: { userId: userId },
+            select: {
+                id: true,
+                createdAt: true,
+                status: true,
+                amount: true,
+                currency: true,
+            },
+            orderBy: { createdAt: 'desc' },
+            take: 50,
+        });
+
+        // 3. Map payments to a common, standardized format
+        const formattedPayments = payments.map(p => ({
+            id: `payment-${p.id}`,
+            date: p.createdAt,
+            type: 'PAYMENT',
+            status: p.status, // SUCCEEDED, REFUNDED, DISPUTED
+            amount: p.netAmountToRecipient,
+            currency: p.currency,
+            description: `From ${p.payerName || 'Anonymous'}`
+        }));
+
+        // 4. Map payouts to the same common format
+        const formattedPayouts = payouts.map(p => ({
+            id: `payout-${p.id}`,
+            date: p.createdAt,
+            type: 'PAYOUT',
+            status: p.status.toString(), // PAID or FAILED
+            amount: p.amount,
+            currency: p.currency,
+            description: p.status === 'FAILED' ? 'Payout Failed' : 'Payout to your bank'
+        }));
+        
+        // 5. Combine both arrays, sort by date descending, and take the most recent 50
+        const transactions = [...formattedPayments, ...formattedPayouts]
+            .sort((a, b) => new Date(b.date) - new Date(a.date))
+            .slice(0, 50);
+
+        res.json(transactions);
+
     } catch (error) {
-      console.error(`[/api/payments/history] Error fetching payment history for user ${userId}:`, error);
-      res.status(500).json({ message: 'Failed to fetch payment history.' });
+        console.error(`[/api/payments/history] Error fetching transaction history for user ${userId}:`, error);
+        res.status(500).json({ message: 'Failed to fetch transaction history.' });
     }
 });
-
 
 module.exports = router;
