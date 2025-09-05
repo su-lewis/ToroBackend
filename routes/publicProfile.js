@@ -3,6 +3,8 @@ const router = express.Router();
 const prisma = require('../lib/prisma');
 const stripe = require('../lib/stripe'); 
 
+console.log('[DIAGNOSTIC] publicProfile.js: Imported stripe object. typeof stripe.countries:', typeof stripe.countries);
+
 // GET /api/public/stripe-supported-countries
 router.get('/stripe-supported-countries', async (req, res) => {
   try {
