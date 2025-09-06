@@ -1,9 +1,6 @@
 const express = require('express');
 const router = express.Router();
-// Initialize its own Stripe instance
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY, {
-    apiVersion: '2023-10-16',
-});
+const stripe = require('../lib/stripe'); // Import the shared instance
 const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
 

@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const prisma = require('./lib/prisma');
 // Initialize Stripe instance specifically for this file's needs (webhooks)
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const stripe = require('./lib/stripe'); // Import the shared instance for webhooks
 
 const app = express();
 const PORT = process.env.PORT || 3001;
