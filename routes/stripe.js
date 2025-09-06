@@ -94,7 +94,6 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
         res.status(500).json({ message: 'Error fetching Stripe account status', error: error.message });
     }
 });
-
 // 3. Create Stripe Checkout Session
 router.post('/create-checkout-session', async (req, res) => {
     try {
@@ -155,14 +154,20 @@ router.post('/create-checkout-session', async (req, res) => {
             mode: 'payment',
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${(creatorReceivesAmountInCents / 100).toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
+            
+            // --- THIS IS THE FIX ---
+            // Reverting to the "Destination Charge" model
             payment_intent_data: {
-                application_fee_amount: platformFeeInCents,
-                on_behalf_of: recipientUser.stripeAccountId,
                 transfer_data: {
-                    destination: recipientUser.stripeAccountId
+                    destination: recipientUser.stripeAccountId,
+                    amount: creatorReceivesAmountInCents // Explicitly set the creator's net amount
                 },
                 statement_descriptor_suffix: statementDescriptorSuffix,
             },
+            // This top-level parameter is the key to making cross-border destination charges work
+            // and ensures webhooks are correctly associated with your platform.
+            stripe_account: recipientUser.stripeAccountId,
+            
             billing_address_collection: 'required',
             metadata: {
                 appRecipientUserId: recipientUser.id,
