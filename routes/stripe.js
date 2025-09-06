@@ -8,7 +8,7 @@ const { authMiddleware } = require('../middleware/auth');
 const PLATFORM_FEE_PERCENTAGE = 0.15; // 15% platform fee
 const PLATFORM_FEE_FIXED_CENTS = 100; // $1.00 in cents
 const MINIMUM_SEND_AMOUNT = 1.00;     // Changed from 5.00
-const MAXIMUM_SEND_AMOUNT = 2000.00;  // Arbitrary new higher limit
+const MAXIMUM_SEND_AMOUNT = 2500.00;  // Arbitrary new higher limit
 
 // --- API ROUTES ---
 
