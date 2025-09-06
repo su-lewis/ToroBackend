@@ -55,6 +55,8 @@ model User {
   stripeOnboardingComplete  Boolean  @default(false)
   payoutsInUsd              Boolean  @default(true)
   autoInstantPayoutsEnabled Boolean  @default(false)
+
+  hasFeeRebateBonus         Boolean  @default(false)
   
   /// Timestamps
   createdAt DateTime @default(now())
