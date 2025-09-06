@@ -1,14 +1,14 @@
 const express = require('express');
 const router = express.Router();
-const stripe = require('../lib/stripe'); // Import the shared instance
+const stripe = require('../lib/stripe'); // Assuming lib/stripe.js exists and is configured
 const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
 
 // --- Constants for payment logic ---
 const PLATFORM_FEE_PERCENTAGE = 0.15; // 15% platform fee
 const PLATFORM_FEE_FIXED_CENTS = 100; // $1.00 in cents
-const MINIMUM_SEND_AMOUNT = 1.00;     // Changed from 5.00
-const MAXIMUM_SEND_AMOUNT = 2500.00;  // Arbitrary new higher limit
+const MINIMUM_SEND_AMOUNT = 1.00;
+const MAXIMUM_SEND_AMOUNT = 2500.00;
 
 // --- API ROUTES ---
 
@@ -120,7 +120,7 @@ router.post('/create-checkout-session', async (req, res) => {
         const platformFeeInCents = Math.round((creatorReceivesAmountInCents * PLATFORM_FEE_PERCENTAGE) + PLATFORM_FEE_FIXED_CENTS);
         const grossAmountInCents = creatorReceivesAmountInCents + platformFeeInCents;
         
-        const MINIMUM_CHARGE_CENTS = { 'usd': 50, 'cad': 50, 'aud': 50, 'gbp': 50, 'eur': 50 };
+        const MINIMUM_CHARGE_CENTS = { 'usd': 50, 'cad': 50, 'aud': 50, 'gbp': 30, 'eur': 50 };
         const minChargeInCents = MINIMUM_CHARGE_CENTS[chargeCurrency] || 50;
         if (grossAmountInCents < minChargeInCents) {
             return res.status(400).json({ message: `The total charge amount is below the minimum.` });
@@ -150,10 +150,17 @@ router.post('/create-checkout-session', async (req, res) => {
             mode: 'payment',
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${(creatorReceivesAmountInCents / 100).toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
+            
+            // --- THIS IS THE UPDATED SECTION ---
             payment_intent_data: {
-                transfer_data: { destination: recipientUser.stripeAccountId, amount: creatorReceivesAmountInCents },
+                application_fee_amount: platformFeeInCents,
+                on_behalf_of: recipientUser.stripeAccountId,
+                transfer_data: {
+                    destination: recipientUser.stripeAccountId
+                },
                 statement_descriptor_suffix: statementDescriptorSuffix,
             },
+            
             billing_address_collection: 'required',
             metadata: {
                 appRecipientUserId: recipientUser.id,
