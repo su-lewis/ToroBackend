@@ -2,8 +2,9 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const prisma = require('./lib/prisma');
-const stripe = require('./lib/stripe');
 const { Resend } = require('resend');
+// Initialize Stripe directly in this file, only for the webhook handler
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 const app = express();
@@ -12,7 +13,7 @@ const PORT = process.env.PORT || 3001;
 // --- CORS Configuration ---
 const frontendUrlFromEnv = process.env.FRONTEND_URL;
 if (!frontendUrlFromEnv) { console.warn("WARNING: FRONTEND_URL environment variable is NOT SET."); }
-const allowedOrigins = [frontendUrlFromEnv || 'http://localhost:3000'].filter(Boolean);
+const allowedOrigins = [frontendUrlFromEnv].filter(Boolean);
 const corsOptions = {
     origin: function (origin, callback) {
         if (!origin || allowedOrigins.indexOf(origin) !== -1) {
@@ -121,31 +122,22 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                         console.log(`[Webhook] Payment record created for PI ${paymentIntent.id}.`);
                     }
                     
-                    if (creator && creator.email) {
+                    if (creator && creator.email && process.env.RESEND_API_KEY) {
                         const amountString = new Intl.NumberFormat('en-US', {
                             style: 'currency',
                             currency: paymentIntent.currency.toUpperCase(),
                         }).format(intendedAmountForCreator / 100);
 
                         await resend.emails.send({
-                            from: 'TributeToro <noreply@yourdomain.com>', // IMPORTANT: Replace with your verified Resend domain
+                            from: 'TributeToro <noreply@tributetoro.com>', // Use your verified domain
                             to: [creator.email],
                             subject: `You received a new tip of ${amountString}!`,
-                            html: `
-                                <div style="font-family: sans-serif; padding: 20px; color: #333;">
-                                    <h2 style="color: #1a1a1a;">Congratulations!</h2>
-                                    <p>You've received a new tip of <strong>${amountString}</strong> from <strong>${metadata.donorName || 'Anonymous'}</strong>.</p>
-                                    <p>The funds have been added to your Stripe account balance and will be paid out according to your schedule.</p>
-                                    <p>Keep up the great work!</p>
-                                    <br/>
-                                    <p>- The TributeToro Team</p>
-                                </div>
-                            `,
+                            html: `<div style="font-family: sans-serif; padding: 20px; color: #333;"><h2>Congratulations!</h2><p>You've received a new tip of <strong>${amountString}</strong> from <strong>${metadata.donorName || 'Anonymous'}</strong>.</p><p>The funds have been added to your Stripe account balance.</p><p>- The TributeToro Team</p></div>`,
                         });
                         console.log(`[EMAIL] Sent new tip notification to ${creator.email}`);
                     }
                 } catch (err) {
-                    console.error(`[Webhook] Error processing bonus, payment, or email for PI ${paymentIntent.id}:`, err.message);
+                    console.error(`[Webhook] Error in payment_intent.succeeded handler for PI ${paymentIntent.id}:`, err.message);
                 }
             }
             break;
@@ -247,6 +239,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
     res.status(200).json({ received: true });
 });
 
+
 // --- GENERAL MIDDLEWARE AND ROUTE MOUNTING ---
 app.use(express.json());
 
@@ -261,12 +254,7 @@ app.use('/api/stripe', stripeRoutes);
 app.use('/api/public', publicProfileRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/payments', authMiddleware, paymentRoutes);
-app.use('/api/links', authMiddleware, (req, res, next) => {
-    if (!req.localUser) {
-        return res.status(403).json({ message: "Profile setup required." });
-    }
-    next();
-}, linkRoutes);
+app.use('/api/links', authMiddleware, linkRoutes);
 
 app.get('/api', (req, res) => res.status(200).json({ status: 'healthy' }));
 
@@ -275,7 +263,6 @@ app.get('/api', (req, res) => res.status(200).json({ status: 'healthy' }));
 app.use((err, req, res, next) => {
     console.error("--- Unhandled Express Error ---", err.stack);
     if (res.headersSent) { return next(err); }
-    if (err.message.includes("not allowed by CORS")) { return res.status(403).json({ error: "CORS_ERROR", message: err.message }); }
     res.status(err.status || 500).json({ error: "INTERNAL_SERVER_ERROR", message: err.message || 'An unexpected error occurred!' });
 });
 

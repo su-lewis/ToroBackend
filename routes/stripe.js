@@ -1,16 +1,21 @@
 const express = require('express');
 const router = express.Router();
-const stripe = require('../lib/stripe'); // Assuming lib/stripe.js exists and is configured
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY, {
+    apiVersion: '2023-10-16',
+    appInfo: {
+        name: 'TributeToro',
+        version: '1.0.0',
+        url: process.env.FRONTEND_URL || 'https://tributetoro.com'
+    }
+});
 const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
 
 // --- Constants for payment logic ---
-const PLATFORM_FEE_PERCENTAGE = 0.15; // 15% platform fee
-const PLATFORM_FEE_FIXED_CENTS = 100; // $1.00 in cents
+const PLATFORM_FEE_PERCENTAGE = 0.15;
+const PLATFORM_FEE_FIXED_CENTS = 100;
 const MINIMUM_SEND_AMOUNT = 1.00;
 const MAXIMUM_SEND_AMOUNT = 2500.00;
-
-// --- API ROUTES ---
 
 // 1. Create Stripe Connect Account and Onboarding Link
 router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
@@ -150,8 +155,6 @@ router.post('/create-checkout-session', async (req, res) => {
             mode: 'payment',
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${(creatorReceivesAmountInCents / 100).toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
-            
-            // --- THIS IS THE UPDATED SECTION ---
             payment_intent_data: {
                 application_fee_amount: platformFeeInCents,
                 on_behalf_of: recipientUser.stripeAccountId,
@@ -160,7 +163,6 @@ router.post('/create-checkout-session', async (req, res) => {
                 },
                 statement_descriptor_suffix: statementDescriptorSuffix,
             },
-            
             billing_address_collection: 'required',
             metadata: {
                 appRecipientUserId: recipientUser.id,
