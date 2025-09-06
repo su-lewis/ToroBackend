@@ -89,25 +89,61 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
             const metadata = paymentIntent.metadata;
             const appRecipientUserId = metadata?.appRecipientUserId;
             const intendedAmountForCreator = parseInt(metadata?.intendedAmountForCreator, 10);
-            const grossAmountChargedToDonor = parseInt(metadata?.grossAmountChargedToDonor, 10);
-            if (paymentIntent.id && appRecipientUserId && !isNaN(intendedAmountForCreator)) {
-                const existingPayment = await prisma.payment.findUnique({ where: { stripePaymentIntentId: paymentIntent.id } });
-                if (!existingPayment) {
-                    await prisma.payment.create({
-                        data: {
-                            stripePaymentIntentId: paymentIntent.id,
-                            amount: grossAmountChargedToDonor,
-                            currency: paymentIntent.currency.toLowerCase(),
-                            status: 'SUCCEEDED',
-                            recipientUserId: appRecipientUserId,
-                            platformFee: grossAmountChargedToDonor - intendedAmountForCreator,
-                            netAmountToRecipient: intendedAmountForCreator,
-                            payerName: metadata.donorName || 'Anonymous',
-                        },
+            
+            // --- THIS IS THE NEW LOGIC ---
+            if (appRecipientUserId && !isNaN(intendedAmountForCreator)) {
+                try {
+                    // Find the creator in our database
+                    const creator = await prisma.user.findUnique({
+                        where: { id: appRecipientUserId },
+                        select: { hasFeeRebateBonus: true, stripeAccountId: true }
                     });
+
+                    // Check if the creator exists and has the bonus enabled
+                    if (creator && creator.hasFeeRebateBonus) {
+                        // Calculate the 10% bonus
+                        const bonusAmount = Math.round(intendedAmountForCreator * 0.10);
+                        
+                        console.log(`[BONUS] Creator ${appRecipientUserId} is eligible for a bonus.`);
+
+                        if (bonusAmount > 0) {
+                            // Create a Stripe Transfer from our platform account to theirs
+                            await stripe.transfers.create({
+                                amount: bonusAmount,
+                                currency: paymentIntent.currency,
+                                destination: creator.stripeAccountId,
+                                // Link it back to the original payment for clear accounting
+                                transfer_group: `bonus_${paymentIntent.id}`,
+                                description: `10% TributeToro Bonus for payment ${paymentIntent.id}`
+                            });
+                            console.log(`[BONUS] Successfully sent ${bonusAmount} bonus to ${creator.stripeAccountId}`);
+                        }
+                    }
+
+                    // The original payment creation logic still runs, but we move it inside the try block
+                    const existingPayment = await prisma.payment.findUnique({ where: { stripePaymentIntentId: paymentIntent.id } });
+                    if (!existingPayment) {
+                        const grossAmountChargedToDonor = parseInt(metadata?.grossAmountChargedToDonor, 10);
+                        await prisma.payment.create({
+                            data: {
+                                stripePaymentIntentId: paymentIntent.id,
+                                amount: grossAmountChargedToDonor,
+                                currency: paymentIntent.currency.toLowerCase(),
+                                status: 'SUCCEEDED',
+                                recipientUserId: appRecipientUserId,
+                                platformFee: grossAmountChargedToDonor - intendedAmountForCreator,
+                                netAmountToRecipient: intendedAmountForCreator,
+                                payerName: metadata.donorName || 'Anonymous',
+                            },
+                        });
+                        console.log(`[Webhook] Payment record created for PI ${paymentIntent.id}.`);
+                    }
+                } catch (err) {
+                    console.error(`[Webhook] Error processing bonus or payment for PI ${paymentIntent.id}:`, err.message);
                 }
             }
             break;
+
         }
         case 'payment_intent.payment_failed': {
             const failedPI = event.data.object;
