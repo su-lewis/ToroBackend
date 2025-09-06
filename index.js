@@ -2,9 +2,10 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const prisma = require('./lib/prisma');
-// Initialize Stripe instance specifically for this file's needs (webhooks)
-const stripe = require('./lib/stripe'); // Import the shared instance for webhooks
+const stripe = require('./lib/stripe');
+const { Resend } = require('resend');
 
+const resend = new Resend(process.env.RESEND_API_KEY);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
@@ -26,15 +27,6 @@ const corsOptions = {
     optionsSuccessStatus: 204
 };
 app.use(cors(corsOptions));
-
-// --- ROUTE IMPORTS ---
-const stripeRoutes = require('./routes/stripe'); 
-const userRoutes = require('./routes/users');
-const linkRoutes = require('./routes/links');
-const publicProfileRoutes = require('./routes/publicProfile');
-const paymentRoutes = require('./routes/payments');
-const { authMiddleware } = require('./middleware/auth');
-
 
 // --- STRIPE WEBHOOK HANDLER ---
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -90,29 +82,20 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
             const appRecipientUserId = metadata?.appRecipientUserId;
             const intendedAmountForCreator = parseInt(metadata?.intendedAmountForCreator, 10);
             
-            // --- THIS IS THE NEW LOGIC ---
             if (appRecipientUserId && !isNaN(intendedAmountForCreator)) {
                 try {
-                    // Find the creator in our database
                     const creator = await prisma.user.findUnique({
                         where: { id: appRecipientUserId },
-                        select: { hasFeeRebateBonus: true, stripeAccountId: true }
+                        select: { email: true, hasFeeRebateBonus: true, stripeAccountId: true }
                     });
 
-                    // Check if the creator exists and has the bonus enabled
                     if (creator && creator.hasFeeRebateBonus) {
-                        // Calculate the 10% bonus
                         const bonusAmount = Math.round(intendedAmountForCreator * 0.10);
-                        
-                        console.log(`[BONUS] Creator ${appRecipientUserId} is eligible for a bonus.`);
-
                         if (bonusAmount > 0) {
-                            // Create a Stripe Transfer from our platform account to theirs
                             await stripe.transfers.create({
                                 amount: bonusAmount,
                                 currency: paymentIntent.currency,
                                 destination: creator.stripeAccountId,
-                                // Link it back to the original payment for clear accounting
                                 transfer_group: `bonus_${paymentIntent.id}`,
                                 description: `10% TributeToro Bonus for payment ${paymentIntent.id}`
                             });
@@ -120,7 +103,6 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                         }
                     }
 
-                    // The original payment creation logic still runs, but we move it inside the try block
                     const existingPayment = await prisma.payment.findUnique({ where: { stripePaymentIntentId: paymentIntent.id } });
                     if (!existingPayment) {
                         const grossAmountChargedToDonor = parseInt(metadata?.grossAmountChargedToDonor, 10);
@@ -138,12 +120,35 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                         });
                         console.log(`[Webhook] Payment record created for PI ${paymentIntent.id}.`);
                     }
+                    
+                    if (creator && creator.email) {
+                        const amountString = new Intl.NumberFormat('en-US', {
+                            style: 'currency',
+                            currency: paymentIntent.currency.toUpperCase(),
+                        }).format(intendedAmountForCreator / 100);
+
+                        await resend.emails.send({
+                            from: 'TributeToro <noreply@yourdomain.com>', // IMPORTANT: Replace with your verified Resend domain
+                            to: [creator.email],
+                            subject: `You received a new tip of ${amountString}!`,
+                            html: `
+                                <div style="font-family: sans-serif; padding: 20px; color: #333;">
+                                    <h2 style="color: #1a1a1a;">Congratulations!</h2>
+                                    <p>You've received a new tip of <strong>${amountString}</strong> from <strong>${metadata.donorName || 'Anonymous'}</strong>.</p>
+                                    <p>The funds have been added to your Stripe account balance and will be paid out according to your schedule.</p>
+                                    <p>Keep up the great work!</p>
+                                    <br/>
+                                    <p>- The TributeToro Team</p>
+                                </div>
+                            `,
+                        });
+                        console.log(`[EMAIL] Sent new tip notification to ${creator.email}`);
+                    }
                 } catch (err) {
-                    console.error(`[Webhook] Error processing bonus or payment for PI ${paymentIntent.id}:`, err.message);
+                    console.error(`[Webhook] Error processing bonus, payment, or email for PI ${paymentIntent.id}:`, err.message);
                 }
             }
             break;
-
         }
         case 'payment_intent.payment_failed': {
             const failedPI = event.data.object;
@@ -244,6 +249,13 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
 
 // --- GENERAL MIDDLEWARE AND ROUTE MOUNTING ---
 app.use(express.json());
+
+const stripeRoutes = require('./routes/stripe'); 
+const userRoutes = require('./routes/users');
+const linkRoutes = require('./routes/links');
+const publicProfileRoutes = require('./routes/publicProfile');
+const paymentRoutes = require('./routes/payments');
+const { authMiddleware } = require('./middleware/auth');
 
 app.use('/api/stripe', stripeRoutes); 
 app.use('/api/public', publicProfileRoutes);
