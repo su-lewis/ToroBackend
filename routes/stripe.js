@@ -5,9 +5,10 @@ const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
 
 // --- Constants for payment logic ---
-const PLATFORM_FEE_PERCENTAGE = 0.15;
-const PLATFORM_FEE_FIXED_CENTS = 100;
-const MINIMUM_SEND_AMOUNT_USD_EQUIVALENT = 5.00;
+const PLATFORM_FEE_PERCENTAGE = 0.15; // 15% platform fee
+const PLATFORM_FEE_FIXED_CENTS = 100; // $1.00 in cents
+const MINIMUM_SEND_AMOUNT = 1.00;     // Changed from 5.00
+const MAXIMUM_SEND_AMOUNT = 2000.00;  // Arbitrary new higher limit
 
 // --- API ROUTES ---
 
@@ -106,8 +107,13 @@ router.post('/create-checkout-session', async (req, res) => {
 
         let chargeCurrency = recipientUser.payoutsInUsd ? 'usd' : (recipientUser.stripeDefaultCurrency || 'usd');
         
-        if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT_USD_EQUIVALENT) {
-            return res.status(400).json({ message: `A valid recipient and amount (min $${MINIMUM_SEND_AMOUNT_USD_EQUIVALENT.toFixed(2)} USD or equivalent) are required.` });
+        if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || 
+            parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT ||
+            parseFloat(amountForCreatorDollars) > MAXIMUM_SEND_AMOUNT
+        ) {
+            return res.status(400).json({ 
+                message: `A valid recipient and amount (min ${MINIMUM_SEND_AMOUNT.toFixed(2)}, max ${MAXIMUM_SEND_AMOUNT.toFixed(2)} or equivalent) are required.` 
+            });
         }
         
         const creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
