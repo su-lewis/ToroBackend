@@ -31,8 +31,10 @@ app.use(cors(corsOptions));
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     const sig = req.headers['stripe-signature'];
     const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-    if (!webhookSecret) return res.status(500).send("Webhook secret not configured.");
-    
+    if (!webhookSecret) {
+        console.error("FATAL: STRIPE_WEBHOOK_SECRET env var is not set.");
+        return res.status(500).send("Webhook secret not configured.");
+    }
     let event;
     try {
         event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
@@ -43,7 +45,6 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
 
     console.log(`[Webhook] Event received and verified: ${event.type}, ID: ${event.id}`);
 
-    // --- This is the new, more robust logic ---
     if (event.type === 'payment_intent.succeeded') {
         const paymentIntent = event.data.object;
         const metadata = paymentIntent.metadata;
@@ -81,7 +82,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
             return res.status(500).json({ error: "Database error during payment creation." });
         }
 
-        // Step 2: Handle secondary actions.
+        // Step 2: Handle secondary actions (bonus, email) in isolated blocks.
         try {
             const creator = await prisma.user.findUnique({ where: { id: appRecipientUserId }, select: { email: true, hasFeeRebateBonus: true, stripeAccountId: true }});
             if (creator) {
@@ -91,6 +92,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                         const bonusAmount = Math.round(intendedAmountForCreator * 0.10);
                         if (bonusAmount > 0) {
                             await stripe.transfers.create({ amount: bonusAmount, currency: paymentIntent.currency, destination: creator.stripeAccountId, transfer_group: `bonus_${paymentIntent.id}` });
+                            console.log(`[BONUS] Successfully sent bonus for PI ${paymentIntent.id}`);
                         }
                     } catch (bonusError) { console.error(`[Webhook] BONUS FAILED for PI ${paymentIntent.id}:`, bonusError.message); }
                 }
@@ -99,6 +101,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                         const intendedAmountForCreator = parseInt(metadata?.intendedAmountForCreator, 10);
                         const amountString = new Intl.NumberFormat('en-US', { style: 'currency', currency: paymentIntent.currency.toUpperCase() }).format(intendedAmountForCreator / 100);
                         await resend.emails.send({ from: 'TributeToro <noreply@tributetoro.com>', to: [creator.email], subject: `You received a new tip of ${amountString}!`, html: `<div>...</div>` });
+                        console.log(`[EMAIL] Sent email for PI ${paymentIntent.id}`);
                     } catch (emailError) { console.error(`[Webhook] EMAIL FAILED for PI ${paymentIntent.id}:`, emailError.message); }
                 }
             }
