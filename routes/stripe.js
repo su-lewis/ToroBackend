@@ -121,11 +121,9 @@ router.post('/create-checkout-session', async (req, res) => {
             });
         }
         
+        // --- THIS IS THE CORRECT FEE CALCULATION FOR YOUR "ADD-ON" MODEL ---
         const creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
-        
-        // This fee calculation is specific to the "Direct Charge" model
-        const grossAmountForFeeCalc = creatorReceivesAmountInCents / (1 - PLATFORM_FEE_PERCENTAGE);
-        const platformFeeInCents = Math.round(grossAmountForFeeCalc - creatorReceivesAmountInCents + PLATFORM_FEE_FIXED_CENTS);
+        const platformFeeInCents = Math.round((creatorReceivesAmountInCents * PLATFORM_FEE_PERCENTAGE) + PLATFORM_FEE_FIXED_CENTS);
         const grossAmountInCents = creatorReceivesAmountInCents + platformFeeInCents;
         
         const MINIMUM_CHARGE_CENTS = { 'usd': 50, 'cad': 50, 'aud': 50, 'gbp': 30, 'eur': 50 };
@@ -135,14 +133,13 @@ router.post('/create-checkout-session', async (req, res) => {
         }
         
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
-        const productDescription = `A one-time payment to support ${recipientUser.displayName || recipientUser.username}.`;
         
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card', 'klarna', 'link'],
             line_items: [{
                 price_data: {
                     currency: chargeCurrency,
-                    product_data: { name: productName, description: productDescription },
+                    product_data: { name: productName },
                     unit_amount: grossAmountInCents
                 },
                 quantity: 1
@@ -151,8 +148,13 @@ router.post('/create-checkout-session', async (req, res) => {
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${(creatorReceivesAmountInCents / 100).toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
             
+            // --- THIS IS THE FINAL, CORRECT PAYMENT LOGIC FOR A GLOBAL PLATFORM ---
             payment_intent_data: {
                 application_fee_amount: platformFeeInCents,
+                on_behalf_of: recipientUser.stripeAccountId,
+                transfer_data: {
+                    destination: recipientUser.stripeAccountId
+                }
             },
             
             billing_address_collection: 'required',
@@ -164,10 +166,7 @@ router.post('/create-checkout-session', async (req, res) => {
                 paymentCurrency: chargeCurrency,
                 donorName: donorName ? donorName.substring(0, 100) : 'Anonymous',
             },
-        }, {
-            stripeAccount: recipientUser.stripeAccountId,
         });
-
         res.json({ id: session.id });
     } catch (error) {
         console.error('[/create-checkout-session] Error:', error.message, error.stack);
