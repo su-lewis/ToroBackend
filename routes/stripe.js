@@ -121,7 +121,6 @@ router.post('/create-checkout-session', async (req, res) => {
             });
         }
         
-        // --- THIS IS THE CORRECT FEE CALCULATION FOR YOUR "ADD-ON" MODEL ---
         const creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
         const platformFeeInCents = Math.round((creatorReceivesAmountInCents * PLATFORM_FEE_PERCENTAGE) + PLATFORM_FEE_FIXED_CENTS);
         const grossAmountInCents = creatorReceivesAmountInCents + platformFeeInCents;
@@ -134,6 +133,9 @@ router.post('/create-checkout-session', async (req, res) => {
         
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
         
+        // Create a unique identifier for this entire transaction operation
+        const uniqueTransferGroup = `tg_${recipientUser.id}_${Date.now()}`;
+
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card', 'klarna', 'link'],
             line_items: [{
@@ -148,13 +150,14 @@ router.post('/create-checkout-session', async (req, res) => {
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${(creatorReceivesAmountInCents / 100).toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
             
-            // --- THIS IS THE FINAL, CORRECT PAYMENT LOGIC FOR A GLOBAL PLATFORM ---
             payment_intent_data: {
                 application_fee_amount: platformFeeInCents,
                 on_behalf_of: recipientUser.stripeAccountId,
                 transfer_data: {
                     destination: recipientUser.stripeAccountId
-                }
+                },
+                // Add the transfer_group to create a strong link back to the platform
+                transfer_group: uniqueTransferGroup,
             },
             
             billing_address_collection: 'required',
