@@ -12,8 +12,8 @@ const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
 
 // --- Constants for payment logic ---
-const PLATFORM_FEE_PERCENTAGE = 0.15;
-const PLATFORM_FEE_FIXED_CENTS = 100;
+const PLATFORM_FEE_PERCENTAGE = 0.15; // 15% platform fee
+const PLATFORM_FEE_FIXED_CENTS = 100; // $1.00 in cents
 const MINIMUM_SEND_AMOUNT = 1.00;
 const MAXIMUM_SEND_AMOUNT = 2500.00;
 
@@ -94,6 +94,7 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
         res.status(500).json({ message: 'Error fetching Stripe account status', error: error.message });
     }
 });
+
 // 3. Create Stripe Checkout Session
 router.post('/create-checkout-session', async (req, res) => {
     try {
@@ -121,7 +122,10 @@ router.post('/create-checkout-session', async (req, res) => {
         }
         
         const creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
-        const platformFeeInCents = Math.round((creatorReceivesAmountInCents * PLATFORM_FEE_PERCENTAGE) + PLATFORM_FEE_FIXED_CENTS);
+        
+        // This fee calculation is specific to the "Direct Charge" model
+        const grossAmountForFeeCalc = creatorReceivesAmountInCents / (1 - PLATFORM_FEE_PERCENTAGE);
+        const platformFeeInCents = Math.round(grossAmountForFeeCalc - creatorReceivesAmountInCents + PLATFORM_FEE_FIXED_CENTS);
         const grossAmountInCents = creatorReceivesAmountInCents + platformFeeInCents;
         
         const MINIMUM_CHARGE_CENTS = { 'usd': 50, 'cad': 50, 'aud': 50, 'gbp': 30, 'eur': 50 };
@@ -132,14 +136,6 @@ router.post('/create-checkout-session', async (req, res) => {
         
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
         const productDescription = `A one-time payment to support ${recipientUser.displayName || recipientUser.username}.`;
-        const prefix = process.env.STRIPE_STATEMENT_DESCRIPTOR_PREFIX;
-        if (!prefix) {
-            console.error("CRITICAL: STRIPE_STATEMENT_DESCRIPTOR_PREFIX is not set.");
-            return res.status(500).json({ message: "Server configuration error." });
-        }
-        const maxSuffixLength = 22 - (prefix.length + 2);
-        const sanitizedUsername = recipientUser.username.replace(/['"*<>]/g, '');
-        const statementDescriptorSuffix = sanitizedUsername.substring(0, maxSuffixLength);
         
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card', 'klarna', 'link'],
@@ -155,18 +151,9 @@ router.post('/create-checkout-session', async (req, res) => {
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${(creatorReceivesAmountInCents / 100).toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
             
-            // --- THIS IS THE FIX ---
-            // Reverting to the "Destination Charge" model
             payment_intent_data: {
-                transfer_data: {
-                    destination: recipientUser.stripeAccountId,
-                    amount: creatorReceivesAmountInCents // Explicitly set the creator's net amount
-                },
-                statement_descriptor_suffix: statementDescriptorSuffix,
+                application_fee_amount: platformFeeInCents,
             },
-            // This top-level parameter is the key to making cross-border destination charges work
-            // and ensures webhooks are correctly associated with your platform.
-            stripe_account: recipientUser.stripeAccountId,
             
             billing_address_collection: 'required',
             metadata: {
@@ -177,7 +164,10 @@ router.post('/create-checkout-session', async (req, res) => {
                 paymentCurrency: chargeCurrency,
                 donorName: donorName ? donorName.substring(0, 100) : 'Anonymous',
             },
+        }, {
+            stripeAccount: recipientUser.stripeAccountId,
         });
+
         res.json({ id: session.id });
     } catch (error) {
         console.error('[/create-checkout-session] Error:', error.message, error.stack);
