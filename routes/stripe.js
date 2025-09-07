@@ -11,9 +11,9 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY, {
 const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
 
-// --- Constants for payment logic ---
-const PLATFORM_FEE_PERCENTAGE = 0.15; // 15% platform fee
-const PLATFORM_FEE_FIXED_CENTS = 100; // $1.00 in cents
+// --- Constants ---
+const PLATFORM_FEE_PERCENTAGE = 0.15;
+const PLATFORM_FEE_FIXED_CENTS = 100;
 const MINIMUM_SEND_AMOUNT = 1.00;
 const MAXIMUM_SEND_AMOUNT = 2500.00;
 
