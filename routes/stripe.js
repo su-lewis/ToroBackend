@@ -1,13 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY, {
-    apiVersion: '2023-10-16',
-    appInfo: {
-        name: 'TributeToro',
-        version: '1.0.0',
-        url: process.env.FRONTEND_URL || 'https://tributetoro.com'
-    }
-});
+// Assuming you have a central stripe instance configured in lib/stripe.js
+const stripe = require('../lib/stripe'); 
 const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
 
@@ -121,7 +115,6 @@ router.post('/create-checkout-session', async (req, res) => {
             });
         }
         
-        // --- THIS IS THE CORRECT FEE CALCULATION FOR YOUR "ADD-ON" MODEL ---
         const creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
         const platformFeeInCents = Math.round((creatorReceivesAmountInCents * PLATFORM_FEE_PERCENTAGE) + PLATFORM_FEE_FIXED_CENTS);
         const grossAmountInCents = creatorReceivesAmountInCents + platformFeeInCents;
@@ -134,7 +127,6 @@ router.post('/create-checkout-session', async (req, res) => {
         
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
         
-        // --- THIS IS THE FINAL, AGENT-CONFIRMED FIX ---
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card', 'klarna', 'link'],
             line_items: [{
@@ -147,12 +139,14 @@ router.post('/create-checkout-session', async (req, res) => {
             }],
             mode: 'payment',
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${(creatorReceivesAmountInCents / 100).toFixed(2)}`,
-            cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
+            cancel_url: `${process.env.FRONTEND_URL}/${recipientUser.username}?payment_cancelled=true`,
             
-            // For a true Direct Charge, we only need to specify the application fee.
-            // Stripe automatically handles the transfer of the rest of the funds to the connected account.
             payment_intent_data: {
                 application_fee_amount: platformFeeInCents,
+                on_behalf_of: recipientUser.stripeAccountId,
+                transfer_data: {
+                    destination: recipientUser.stripeAccountId
+                }
             },
             
             billing_address_collection: 'required',
@@ -164,12 +158,7 @@ router.post('/create-checkout-session', async (req, res) => {
                 paymentCurrency: chargeCurrency,
                 donorName: donorName ? donorName.substring(0, 100) : 'Anonymous',
             },
-        }, {
-            // This is the Stripe-Account header the agent is asking you to use.
-            // This forces the entire operation to happen ON the connected account.
-            stripeAccount: recipientUser.stripeAccountId,
         });
-
         res.json({ id: session.id });
     } catch (error) {
         console.error('[/create-checkout-session] Error:', error.message, error.stack);
