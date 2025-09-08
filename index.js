@@ -49,33 +49,14 @@ app.post('/api/stripe/account-webhook', express.raw({ type: 'application/json' }
     }
     
     console.log(`[Account Webhook] Event received: ${event.type}, ID: ${event.id}`);
-    res.status(200).json({ received: true });
-});
 
-// URL: /api/stripe/connect-webhook
-app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-    const sig = req.headers['stripe-signature'];
-    const webhookSecret = process.env.STRIPE_CONNECT_WEBHOOK_SECRET;
-    if (!webhookSecret) {
-        console.error("FATAL: STRIPE_CONNECT_WEBHOOK_SECRET env var is not set.");
-        return res.status(500).send("Connect Webhook secret not configured.");
-    }
-
-    let event;
-    try {
-        event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
-    } catch (err) {
-        console.error(`[Connect Webhook] Signature verification failed: ${err.message}`);
-        return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-    console.log(`[Connect Webhook] Event received and verified: ${event.type}, ID: ${event.id}`);
-
+    // --- PAYMENT LOGIC MOVED HERE ---
     switch (event.type) {
         case 'checkout.session.completed': {
             const session = event.data.object;
             
             if (session.payment_status !== 'paid') {
-                console.log(`[Connect Webhook] Ignoring checkout.session.completed with status: ${session.payment_status}`);
+                console.log(`[Account Webhook] Ignoring checkout.session.completed with status: ${session.payment_status}`);
                 break;
             }
 
@@ -84,7 +65,7 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
             const appRecipientUserId = metadata?.appRecipientUserId;
 
             if (!appRecipientUserId || !paymentIntentId) {
-                console.error(`[Connect Webhook] Missing critical metadata for session ${session.id}`);
+                console.error(`[Account Webhook] Missing critical metadata for session ${session.id}`);
                 break;
             }
 
@@ -107,10 +88,10 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
                             payerEmail: session.customer_details?.email,
                         },
                     });
-                    console.log(`[Connect Webhook] Payment record created from session ${session.id} for PI ${paymentIntentId}.`);
+                    console.log(`[Account Webhook] Payment record created from session ${session.id} for PI ${paymentIntentId}.`);
                 }
             } catch (dbError) {
-                console.error(`[Connect Webhook] CRITICAL: DB write failed for session ${session.id}. Error:`, dbError);
+                console.error(`[Account Webhook] CRITICAL: DB write failed for session ${session.id}. Error:`, dbError);
                 return res.status(500).json({ error: "Database write failed." });
             }
 
@@ -124,9 +105,10 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
                             const intendedAmountForCreator = parseInt(metadata.intendedAmountForCreator, 10);
                             const bonusAmount = Math.round(intendedAmountForCreator * 0.10);
                             if (bonusAmount > 0) {
+                                // NOTE: For Destination charges, bonuses are platform-to-creator transfers.
                                 await stripe.transfers.create({ amount: bonusAmount, currency: session.currency, destination: creator.stripeAccountId, transfer_group: `bonus_${paymentIntentId}` });
                             }
-                        } catch (bonusError) { console.error(`[Connect Webhook] BONUS FAILED for session ${session.id}:`, bonusError.message); }
+                        } catch (bonusError) { console.error(`[Account Webhook] BONUS FAILED for session ${session.id}:`, bonusError.message); }
                     }
                     // Email Logic
                     if (creator.email && process.env.RESEND_API_KEY) {
@@ -134,20 +116,42 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
                             const intendedAmountForCreator = parseInt(metadata.intendedAmountForCreator, 10);
                             const amountString = new Intl.NumberFormat('en-US', { style: 'currency', currency: session.currency.toUpperCase() }).format(intendedAmountForCreator / 100);
                             await resend.emails.send({ from: 'TributeToro <noreply@tributetoro.com>', to: [creator.email], subject: `You received a new tip of ${amountString}!`, html: `<div>...</div>` });
-                        } catch (emailError) { console.error(`[Connect Webhook] EMAIL FAILED for session ${session.id}:`, emailError.message); }
+                        } catch (emailError) { console.error(`[Account Webhook] EMAIL FAILED for session ${session.id}:`, emailError.message); }
                     }
                 }
             } catch (secondaryError) {
-                console.error(`[Connect Webhook] Error in secondary actions for session ${session.id}:`, secondaryError.message);
+                console.error(`[Account Webhook] Error in secondary actions for session ${session.id}:`, secondaryError.message);
             }
             break;
         }
+        // You can add other account-level event handlers here if needed
+    }
 
-        case 'checkout.session.completed': {
-            console.log(`[Connect Webhook] Received checkout.session.completed for session: ${event.data.object.id}. Main logic is handled by payment_intent.succeeded.`);
-            break;
-        }
+    res.status(200).json({ received: true });
+});
+
+// URL: /api/stripe/connect-webhook
+app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    const webhookSecret = process.env.STRIPE_CONNECT_WEBHOOK_SECRET;
+    if (!webhookSecret) {
+        console.error("FATAL: STRIPE_CONNECT_WEBHOOK_SECRET env var is not set.");
+        return res.status(500).send("Connect Webhook secret not configured.");
+    }
+
+    let event;
+    try {
+        event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    } catch (err) {
+        console.error(`[Connect Webhook] Signature verification failed: ${err.message}`);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+    console.log(`[Connect Webhook] Event received and verified: ${event.type}, ID: ${event.id}`);
+    
+    // --- PAYMENT LOGIC IS REMOVED FROM HERE ---
+    switch (event.type) {
         case 'payment_intent.payment_failed': {
+            // This logic can stay if you need to track failures
             const failedPI = event.data.object;
             await prisma.failedPaymentAttempt.create({
                 data: {
@@ -160,6 +164,7 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
             break;
         }
         case 'charge.refunded': {
+            // This logic stays here
             const refund = event.data.object;
             await prisma.payment.update({
                 where: { stripePaymentIntentId: refund.payment_intent }, data: { status: 'REFUNDED' },
@@ -167,6 +172,7 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
             break;
         }
         case 'charge.dispute.created': {
+             // This logic stays here
             const dispute = event.data.object;
             await prisma.payment.update({
                 where: { stripePaymentIntentId: dispute.payment_intent }, data: { status: 'DISPUTED' },
@@ -174,6 +180,7 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
             break;
         }
         case 'charge.dispute.closed': {
+             // This logic stays here
             const closedDispute = event.data.object;
             const newStatus = closedDispute.status === 'won' ? 'SUCCEEDED' : 'FAILED';
             await prisma.payment.update({
@@ -182,6 +189,7 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
             break;
         }
         case 'payout.paid': {
+             // This logic stays here
             const payout = event.data.object;
             const user = await prisma.user.findFirst({ where: { stripeAccountId: event.account } });
             if (user) {
@@ -195,6 +203,7 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
             break;
         }
         case 'payout.failed': {
+             // This logic stays here
             const payout = event.data.object;
             const user = await prisma.user.findFirst({ where: { stripeAccountId: event.account } });
             if (user) {
@@ -208,6 +217,7 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
             break;
         }
         case 'balance.available': {
+             // This logic stays here
             const stripeAccountId = event.account;
             const user = await prisma.user.findFirst({ where: { stripeAccountId } });
             if (user && user.autoInstantPayoutsEnabled) {
@@ -223,6 +233,7 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
             break;
         }
         case 'account.updated': {
+             // This logic stays here
             const account = event.data.object;
             const userToUpdate = await prisma.user.findFirst({ where: { stripeAccountId: account.id } });
             if (userToUpdate) {
@@ -236,7 +247,6 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
     }
     res.status(200).json({ received: true });
 });
-
 
 // --- GENERAL MIDDLEWARE AND ROUTE IMPORTS ---
 app.use(express.json());
