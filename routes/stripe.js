@@ -1,17 +1,24 @@
 const express = require('express');
 const router = express.Router();
-// Assuming you have a central stripe instance configured in lib/stripe.js
-const stripe = require('../lib/stripe'); 
+// Initialize its own Stripe instance
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY, {
+    apiVersion: '2023-10-16',
+    appInfo: {
+        name: 'TributeToro',
+        version: '1.0.0',
+        url: process.env.FRONTEND_URL || 'https://tributetoro.com'
+    }
+});
 const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
 
-// --- Constants for payment logic ---
-const PLATFORM_FEE_PERCENTAGE = 0.15; // 15% platform fee
-const PLATFORM_FEE_FIXED_CENTS = 100; // $1.00 in cents
+// --- Constants ---
+const PLATFORM_FEE_PERCENTAGE = 0.15;
+const PLATFORM_FEE_FIXED_CENTS = 100;
 const MINIMUM_SEND_AMOUNT = 1.00;
 const MAXIMUM_SEND_AMOUNT = 2500.00;
 
-// 1. Create Stripe Connect Account and Onboarding Link
+// 1. Create Onboarding Link
 router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
     try {
         const { country } = req.body;
@@ -33,10 +40,7 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
         let stripeAccountId = appProfile.stripeAccountId;
         if (!stripeAccountId) {
             const accountParams = {
-                type: 'express',
-                email: emailForStripe,
-                country: country,
-                business_type: 'individual',
+                type: 'express', email: emailForStripe, country: country, business_type: 'individual',
                 business_profile: { url: `${platformBaseUrl}/${appProfile.username}`, mcc: '5815' },
                 capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
             };
@@ -55,16 +59,14 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
     }
 });
 
-// 2. Get Stripe Account Status
+// 2. Get Account Status
 router.get('/connect/account-status', authMiddleware, async (req, res) => {
     try {
         if (!req.localUser?.id) return res.status(403).json({ message: 'User profile not found.' });
         const user = req.localUser;
         if (!user.stripeAccountId) return res.status(404).json({ message: 'Stripe account not connected for this user.' });
-
         const account = await stripe.accounts.retrieve(user.stripeAccountId);
         const onboardingComplete = !!(account.charges_enabled && account.details_submitted && account.payouts_enabled);
-
         await prisma.user.update({
             where: { id: user.id },
             data: {
@@ -73,14 +75,10 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
                 stripeAccountCountry: account.country,
             },
         });
-
         res.json({
-            stripeAccountId: user.stripeAccountId,
-            detailsSubmitted: account.details_submitted,
-            chargesEnabled: account.charges_enabled,
-            payoutsEnabled: account.payouts_enabled,
-            onboardingComplete: onboardingComplete,
-            accountCountry: account.country,
+            stripeAccountId: user.stripeAccountId, detailsSubmitted: account.details_submitted,
+            chargesEnabled: account.charges_enabled, payoutsEnabled: account.payouts_enabled,
+            onboardingComplete: onboardingComplete, accountCountry: account.country,
             defaultCurrency: account.default_currency,
         });
     } catch (error) {
@@ -89,7 +87,7 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
     }
 });
 
-// 3. Create Stripe Checkout Session
+// 3. Create Checkout Session (The final "Direct Charge" version)
 router.post('/create-checkout-session', async (req, res) => {
     try {
         if (!req.body) return res.status(400).json({ message: 'Request body is missing.' });
@@ -105,15 +103,6 @@ router.post('/create-checkout-session', async (req, res) => {
         }
 
         let chargeCurrency = recipientUser.payoutsInUsd ? 'usd' : (recipientUser.stripeDefaultCurrency || 'usd');
-        
-        if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || 
-            parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT ||
-            parseFloat(amountForCreatorDollars) > MAXIMUM_SEND_AMOUNT
-        ) {
-            return res.status(400).json({ 
-                message: `A valid recipient and amount (min ${MINIMUM_SEND_AMOUNT.toFixed(2)}, max ${MAXIMUM_SEND_AMOUNT.toFixed(2)} or equivalent) are required.` 
-            });
-        }
         
         const creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
         const platformFeeInCents = Math.round((creatorReceivesAmountInCents * PLATFORM_FEE_PERCENTAGE) + PLATFORM_FEE_FIXED_CENTS);
@@ -140,15 +129,9 @@ router.post('/create-checkout-session', async (req, res) => {
             mode: 'payment',
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${(creatorReceivesAmountInCents / 100).toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUser.username}?payment_cancelled=true`,
-            
             payment_intent_data: {
                 application_fee_amount: platformFeeInCents,
-                on_behalf_of: recipientUser.stripeAccountId,
-                transfer_data: {
-                    destination: recipientUser.stripeAccountId
-                }
             },
-            
             billing_address_collection: 'required',
             metadata: {
                 appRecipientUserId: recipientUser.id,
@@ -158,6 +141,8 @@ router.post('/create-checkout-session', async (req, res) => {
                 paymentCurrency: chargeCurrency,
                 donorName: donorName ? donorName.substring(0, 100) : 'Anonymous',
             },
+        }, {
+            stripeAccount: recipientUser.stripeAccountId,
         });
         res.json({ id: session.id });
     } catch (error) {
@@ -166,7 +151,7 @@ router.post('/create-checkout-session', async (req, res) => {
     }
 });
 
-// 4. Create Stripe Express Dashboard Login Link
+// 4. Create Express Dashboard Link
 router.post('/create-express-dashboard-link', authMiddleware, async (req, res) => {
     try {
         if (!req.localUser?.id) return res.status(403).json({ message: 'User profile not found.' });
@@ -179,7 +164,7 @@ router.post('/create-express-dashboard-link', authMiddleware, async (req, res) =
     }
 });
 
-// 5. TRIGGER A MANUAL INSTANT PAYOUT ("Payout Now" button)
+// 5. Trigger Instant Payout
 router.post('/payouts/instant', authMiddleware, async (req, res) => {
     try {
         if (!req.localUser?.stripeAccountId || !req.localUser.stripeOnboardingComplete) {
@@ -195,25 +180,23 @@ router.post('/payouts/instant', authMiddleware, async (req, res) => {
             return res.status(400).json({ message: "No available balance for an instant payout." });
         }
         const payout = await stripe.payouts.create({
-            amount: availableBalance.amount,
-            currency: defaultCurrency,
-            method: 'instant',
+            amount: availableBalance.amount, currency: defaultCurrency, method: 'instant',
         }, { stripeAccount: stripeAccountId });
-        res.json({ success: true, message: `Instant payout of ${formatCurrency(payout.amount, payout.currency)} initiated.`, payoutId: payout.id });
+        res.json({ success: true, message: `Instant payout initiated.`, payoutId: payout.id });
     } catch (error) {
         console.error("[/payouts/instant] Stripe Payout Error:", error);
         let userMessage = "Failed to initiate instant payout.";
         if (error.type === 'StripeInvalidRequestError') {
-            if (error.code === 'balance_insufficient') userMessage = "Your available balance is insufficient for a payout.";
-            else if (error.code === 'instant_payouts_unsupported') userMessage = "Instant Payouts are not supported for your bank account country.";
-            else if (error.code === 'payouts_not_allowed') userMessage = "Payouts are currently disabled on your account. Please check your Stripe dashboard.";
-            else userMessage = "Could not process payout. Please ensure you have an eligible debit card on file with Stripe for Instant Payouts.";
+            if (error.code === 'balance_insufficient') userMessage = "Your available balance is insufficient.";
+            else if (error.code === 'instant_payouts_unsupported') userMessage = "Instant Payouts are not supported for your bank.";
+            else if (error.code === 'payouts_not_allowed') userMessage = "Payouts are currently disabled on your account.";
+            else userMessage = "Could not process payout. Ensure an eligible debit card is on file with Stripe.";
         }
         res.status(400).json({ message: userMessage, error: error.message });
     }
 });
 
-// 6. TOGGLE AUTOMATIC PAYOUT MODE
+// 6. Toggle Auto Payout Mode
 router.post('/payouts/toggle-mode', authMiddleware, async (req, res) => {
     try {
         if (!req.localUser?.stripeAccountId || !req.localUser.stripeOnboardingComplete) {
@@ -221,7 +204,7 @@ router.post('/payouts/toggle-mode', authMiddleware, async (req, res) => {
         }
         const { instantPayoutsEnabled } = req.body;
         if (typeof instantPayoutsEnabled !== 'boolean') {
-            return res.status(400).json({ message: "A boolean value for 'instantPayoutsEnabled' is required." });
+            return res.status(400).json({ message: "Invalid value provided." });
         }
         const user = req.localUser;
         const stripeAccountId = user.stripeAccountId;
@@ -233,7 +216,7 @@ router.post('/payouts/toggle-mode', authMiddleware, async (req, res) => {
             where: { id: user.id },
             data: { autoInstantPayoutsEnabled: instantPayoutsEnabled },
         });
-        const message = instantPayoutsEnabled ? "Automatic Instant Payouts enabled." : "Automatic Standard Payouts enabled.";
+        const message = `Payout mode set to ${instantPayoutsEnabled ? "Instant" : "Standard Daily"}.`;
         res.json({ success: true, message: message, autoInstantPayoutsEnabled: updatedUser.autoInstantPayoutsEnabled });
     } catch (error) {
         console.error("[/payouts/toggle-mode] Error:", error);
@@ -241,7 +224,7 @@ router.post('/payouts/toggle-mode', authMiddleware, async (req, res) => {
     }
 });
 
-// 7. GET STRIPE CONNECT ACCOUNT BALANCE
+// 7. Get Balance
 router.get('/balance', authMiddleware, async (req, res) => {
     try {
         if (!req.localUser?.stripeAccountId || !req.localUser.stripeOnboardingComplete) {
@@ -255,10 +238,5 @@ router.get('/balance', authMiddleware, async (req, res) => {
         res.status(500).json({ message: 'Error fetching Stripe balance', error: error.message });
     }
 });
-
-// --- HELPER FUNCTION ---
-const formatCurrency = (cents, currency = 'USD') => {
-    return new Intl.NumberFormat(undefined, { style: 'currency', currency: currency.toUpperCase() }).format(cents / 100);
-};
 
 module.exports = router;

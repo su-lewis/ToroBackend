@@ -3,9 +3,10 @@ const express = require('express');
 const cors = require('cors');
 const prisma = require('./lib/prisma');
 const { Resend } = require('resend');
+// Initialize Stripe and Resend directly in this file
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-
 const resend = new Resend(process.env.RESEND_API_KEY);
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
@@ -28,10 +29,8 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
-
 // --- WEBHOOK HANDLER #1: For Standard "Account" Events ---
 // URL: /api/stripe/account-webhook
-// Listens for events that happen directly on your platform's Stripe account.
 app.post('/api/stripe/account-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     const sig = req.headers['stripe-signature'];
     const webhookSecret = process.env.STRIPE_ACCOUNT_WEBHOOK_SECRET; 
@@ -49,17 +48,11 @@ app.post('/api/stripe/account-webhook', express.raw({ type: 'application/json' }
     }
     
     console.log(`[Account Webhook] Event received: ${event.type}, ID: ${event.id}`);
-    
-    // You can handle account-specific events here in the future if needed.
-    // For now, we just acknowledge receipt.
-    
     res.status(200).json({ received: true });
 });
 
-
 // --- WEBHOOK HANDLER #2: For "Connect" Events ---
 // URL: /api/stripe/connect-webhook
-// This is the primary handler for all activity related to your connected accounts.
 app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     const sig = req.headers['stripe-signature'];
     const webhookSecret = process.env.STRIPE_CONNECT_WEBHOOK_SECRET;
@@ -82,16 +75,16 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
             const paymentIntent = event.data.object;
             const metadata = paymentIntent.metadata;
             const appRecipientUserId = metadata?.appRecipientUserId;
-            const intendedAmountForCreator = parseInt(metadata?.intendedAmountForCreator, 10);
             
-            if (!appRecipientUserId || isNaN(intendedAmountForCreator)) {
-                console.error(`[Connect Webhook] Missing or invalid metadata for PI ${paymentIntent.id}`);
+            if (!appRecipientUserId) {
+                console.error(`[Connect Webhook] Missing appRecipientUserId metadata for PI ${paymentIntent.id}`);
                 break; 
             }
             
             try {
                 const existingPayment = await prisma.payment.findUnique({ where: { stripePaymentIntentId: paymentIntent.id } });
                 if (!existingPayment) {
+                    const intendedAmountForCreator = parseInt(metadata?.intendedAmountForCreator, 10);
                     const grossAmountChargedToDonor = parseInt(metadata?.grossAmountChargedToDonor, 10);
                     await prisma.payment.create({
                         data: {
@@ -112,6 +105,7 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
                 if (creator) {
                     if (creator.hasFeeRebateBonus) {
                         try {
+                            const intendedAmountForCreator = parseInt(metadata?.intendedAmountForCreator, 10);
                             const bonusAmount = Math.round(intendedAmountForCreator * 0.10);
                             if (bonusAmount > 0) {
                                 await stripe.transfers.create({ amount: bonusAmount, currency: paymentIntent.currency, destination: creator.stripeAccountId, transfer_group: `bonus_${paymentIntent.id}` });
@@ -121,6 +115,7 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
                     }
                     if (creator.email && process.env.RESEND_API_KEY) {
                         try {
+                            const intendedAmountForCreator = parseInt(metadata?.intendedAmountForCreator, 10);
                             const amountString = new Intl.NumberFormat('en-US', { style: 'currency', currency: paymentIntent.currency.toUpperCase() }).format(intendedAmountForCreator / 100);
                             await resend.emails.send({ from: 'TributeToro <noreply@tributetoro.com>', to: [creator.email], subject: `You received a new tip of ${amountString}!`, html: `<div style="font-family: sans-serif; padding: 20px; color: #333;"><h2>Congratulations!</h2><p>You've received a new tip of <strong>${amountString}</strong> from <strong>${metadata.donorName || 'Anonymous'}</strong>.</p><p>The funds have been added to your Stripe account balance.</p><p>- The TributeToro Team</p></div>` });
                             console.log(`[Connect Webhook] EMAIL Sent for PI ${paymentIntent.id}`);
@@ -130,19 +125,15 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
             } catch (secondaryError) { console.error(`[Connect Webhook] Error in secondary actions for PI ${paymentIntent.id}:`, secondaryError.message); }
             break;
         }
-
         case 'checkout.session.completed': {
             console.log(`[Connect Webhook] Received checkout.session.completed for session: ${event.data.object.id}. Main logic is handled by payment_intent.succeeded.`);
             break;
         }
-        
         case 'payment_intent.payment_failed': {
             const failedPI = event.data.object;
             await prisma.failedPaymentAttempt.create({
                 data: {
-                    stripePiId: failedPI.id,
-                    amount: failedPI.amount,
-                    currency: failedPI.currency,
+                    stripePiId: failedPI.id, amount: failedPI.amount, currency: failedPI.currency,
                     recipientUserId: failedPI.metadata?.appRecipientUserId || 'unknown',
                     failureCode: failedPI.last_payment_error?.code,
                     failureMessage: failedPI.last_payment_error?.message,
@@ -153,16 +144,14 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
         case 'charge.refunded': {
             const refund = event.data.object;
             await prisma.payment.update({
-                where: { stripePaymentIntentId: refund.payment_intent },
-                data: { status: 'REFUNDED' },
+                where: { stripePaymentIntentId: refund.payment_intent }, data: { status: 'REFUNDED' },
             }).catch(err => console.error(`[Connect Webhook] DB Error on charge.refunded:`, err));
             break;
         }
         case 'charge.dispute.created': {
             const dispute = event.data.object;
             await prisma.payment.update({
-                where: { stripePaymentIntentId: dispute.payment_intent },
-                data: { status: 'DISPUTED' },
+                where: { stripePaymentIntentId: dispute.payment_intent }, data: { status: 'DISPUTED' },
             }).catch(err => console.error(`[Connect Webhook] DB Error on charge.dispute.created:`, err));
             break;
         }
@@ -170,8 +159,7 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
             const closedDispute = event.data.object;
             const newStatus = closedDispute.status === 'won' ? 'SUCCEEDED' : 'FAILED';
             await prisma.payment.update({
-                where: { stripePaymentIntentId: closedDispute.payment_intent },
-                data: { status: newStatus },
+                where: { stripePaymentIntentId: closedDispute.payment_intent }, data: { status: newStatus },
             }).catch(err => console.error(`[Connect Webhook] DB Error on charge.dispute.closed:`, err));
             break;
         }
@@ -209,9 +197,7 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
                 const availableBalance = balance.available.find(b => b.currency === user.stripeDefaultCurrency);
                 if (availableBalance && availableBalance.amount > 0) {
                     await stripe.payouts.create({
-                        amount: availableBalance.amount,
-                        currency: availableBalance.currency,
-                        method: 'instant',
+                        amount: availableBalance.amount, currency: availableBalance.currency, method: 'instant',
                     }, { stripeAccount: stripeAccountId })
                         .catch(payoutError => console.error(`[Connect Webhook] Auto-payout failed for ${stripeAccountId}:`, payoutError.message));
                 }
