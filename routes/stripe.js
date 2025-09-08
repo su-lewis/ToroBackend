@@ -144,7 +144,11 @@ router.post('/create-checkout-session', async (req, res) => {
         }, {
             stripeAccount: recipientUser.stripeAccountId,
         });
-        res.json({ id: session.id });
+
+        // --- THIS IS THE FIX ---
+        // Return the entire session object, which includes both the `id` and the `url`.
+        res.json(session);
+
     } catch (error) {
         console.error('[/create-checkout-session] Error:', error.message, error.stack);
         res.status(500).json({ message: 'Error creating payment session', error: error.message });
