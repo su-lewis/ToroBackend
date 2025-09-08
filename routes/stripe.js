@@ -11,9 +11,9 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY, {
 const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
 
-// --- Constants ---
-const PLATFORM_FEE_PERCENTAGE = 0.15;
-const PLATFORM_FEE_FIXED_CENTS = 100;
+// --- Constants for payment logic ---
+const PLATFORM_FEE_PERCENTAGE = 0.15; // 15% platform fee
+const PLATFORM_FEE_FIXED_CENTS = 100; // $1.00 in cents
 const MINIMUM_SEND_AMOUNT = 1.00;
 const MAXIMUM_SEND_AMOUNT = 2500.00;
 
@@ -133,9 +133,6 @@ router.post('/create-checkout-session', async (req, res) => {
         
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
         
-        // Create a unique identifier for this entire transaction operation
-        const uniqueTransferGroup = `tg_${recipientUser.id}_${Date.now()}`;
-
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card', 'klarna', 'link'],
             line_items: [{
@@ -152,12 +149,6 @@ router.post('/create-checkout-session', async (req, res) => {
             
             payment_intent_data: {
                 application_fee_amount: platformFeeInCents,
-                on_behalf_of: recipientUser.stripeAccountId,
-                transfer_data: {
-                    destination: recipientUser.stripeAccountId
-                },
-                // Add the transfer_group to create a strong link back to the platform
-                transfer_group: uniqueTransferGroup,
             },
             
             billing_address_collection: 'required',
@@ -169,7 +160,10 @@ router.post('/create-checkout-session', async (req, res) => {
                 paymentCurrency: chargeCurrency,
                 donorName: donorName ? donorName.substring(0, 100) : 'Anonymous',
             },
+        }, {
+            stripeAccount: recipientUser.stripeAccountId,
         });
+
         res.json({ id: session.id });
     } catch (error) {
         console.error('[/create-checkout-session] Error:', error.message, error.stack);
@@ -224,7 +218,7 @@ router.post('/payouts/instant', authMiddleware, async (req, res) => {
     }
 });
 
-// 6. TOGGLE AUTOMATIC PAYOUT MODE (NEW LOGIC)
+// 6. TOGGLE AUTOMATIC PAYOUT MODE
 router.post('/payouts/toggle-mode', authMiddleware, async (req, res) => {
     try {
         if (!req.localUser?.stripeAccountId || !req.localUser.stripeOnboardingComplete) {
