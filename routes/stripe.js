@@ -121,6 +121,7 @@ router.post('/create-checkout-session', async (req, res) => {
             });
         }
         
+        // --- THIS IS THE CORRECT FEE CALCULATION FOR YOUR "ADD-ON" MODEL ---
         const creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
         const platformFeeInCents = Math.round((creatorReceivesAmountInCents * PLATFORM_FEE_PERCENTAGE) + PLATFORM_FEE_FIXED_CENTS);
         const grossAmountInCents = creatorReceivesAmountInCents + platformFeeInCents;
@@ -133,6 +134,7 @@ router.post('/create-checkout-session', async (req, res) => {
         
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
         
+        // --- THIS IS THE FINAL, AGENT-CONFIRMED FIX ---
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card', 'klarna', 'link'],
             line_items: [{
@@ -147,6 +149,8 @@ router.post('/create-checkout-session', async (req, res) => {
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${(creatorReceivesAmountInCents / 100).toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUsername}?payment_cancelled=true`,
             
+            // For a true Direct Charge, we only need to specify the application fee.
+            // Stripe automatically handles the transfer of the rest of the funds to the connected account.
             payment_intent_data: {
                 application_fee_amount: platformFeeInCents,
             },
@@ -161,6 +165,8 @@ router.post('/create-checkout-session', async (req, res) => {
                 donorName: donorName ? donorName.substring(0, 100) : 'Anonymous',
             },
         }, {
+            // This is the Stripe-Account header the agent is asking you to use.
+            // This forces the entire operation to happen ON the connected account.
             stripeAccount: recipientUser.stripeAccountId,
         });
 
