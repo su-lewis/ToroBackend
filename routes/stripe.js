@@ -87,7 +87,7 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
     }
 });
 
-// 3. Create Checkout Session (The final "Direct Charge" version)
+// 3. Create Stripe Checkout Session
 router.post('/create-checkout-session', async (req, res) => {
     try {
         if (!req.body) return res.status(400).json({ message: 'Request body is missing.' });
@@ -104,6 +104,15 @@ router.post('/create-checkout-session', async (req, res) => {
 
         let chargeCurrency = recipientUser.payoutsInUsd ? 'usd' : (recipientUser.stripeDefaultCurrency || 'usd');
         
+        if (!recipientUsername || isNaN(parseFloat(amountForCreatorDollars)) || 
+            parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT ||
+            parseFloat(amountForCreatorDollars) > MAXIMUM_SEND_AMOUNT
+        ) {
+            return res.status(400).json({ 
+                message: `A valid recipient and amount (min ${MINIMUM_SEND_AMOUNT.toFixed(2)}, max ${MAXIMUM_SEND_AMOUNT.toFixed(2)} or equivalent) are required.` 
+            });
+        }
+        
         const creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
         const platformFeeInCents = Math.round((creatorReceivesAmountInCents * PLATFORM_FEE_PERCENTAGE) + PLATFORM_FEE_FIXED_CENTS);
         const grossAmountInCents = creatorReceivesAmountInCents + platformFeeInCents;
@@ -115,13 +124,22 @@ router.post('/create-checkout-session', async (req, res) => {
         }
         
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
+        const productDescription = `A one-time payment to support ${recipientUser.displayName || recipientUser.username}.`;
+        const prefix = process.env.STRIPE_STATEMENT_DESCRIPTOR_PREFIX;
+        if (!prefix) {
+            console.error("CRITICAL: STRIPE_STATEMENT_DESCRIPTOR_PREFIX is not set.");
+            return res.status(500).json({ message: "Server configuration error." });
+        }
+        const maxSuffixLength = 22 - (prefix.length + 2);
+        const sanitizedUsername = recipientUser.username.replace(/['"*<>]/g, '');
+        const statementDescriptorSuffix = sanitizedUsername.substring(0, maxSuffixLength);
         
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card', 'klarna', 'link'],
             line_items: [{
                 price_data: {
                     currency: chargeCurrency,
-                    product_data: { name: productName },
+                    product_data: { name: productName, description: productDescription },
                     unit_amount: grossAmountInCents
                 },
                 quantity: 1
@@ -129,9 +147,20 @@ router.post('/create-checkout-session', async (req, res) => {
             mode: 'payment',
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${(creatorReceivesAmountInCents / 100).toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUser.username}?payment_cancelled=true`,
+            
+            // This object creates a Destination Charge that is settled on behalf of the creator,
+            // which is the correct model for cross-border payments according to the documentation.
             payment_intent_data: {
-                application_fee_amount: platformFeeInCents,
+                on_behalf_of: recipientUser.stripeAccountId,
+                transfer_data: {
+                    destination: recipientUser.stripeAccountId,
+                    // The amount is the net amount the creator will receive.
+                    // The platform fee is calculated implicitly by Stripe: (Gross Amount - Transfer Amount)
+                    amount: creatorReceivesAmountInCents
+                },
+                statement_descriptor_suffix: statementDescriptorSuffix,
             },
+            
             billing_address_collection: 'required',
             metadata: {
                 appRecipientUserId: recipientUser.id,
@@ -141,12 +170,9 @@ router.post('/create-checkout-session', async (req, res) => {
                 paymentCurrency: chargeCurrency,
                 donorName: donorName ? donorName.substring(0, 100) : 'Anonymous',
             },
-        }, {
-            stripeAccount: recipientUser.stripeAccountId,
         });
 
-        // --- THIS IS THE FIX ---
-        // Return the entire session object, which includes both the `id` and the `url`.
+        // Return the entire session object, as recommended by the Stripe agent.
         res.json(session);
 
     } catch (error) {
