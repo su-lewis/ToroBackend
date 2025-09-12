@@ -173,7 +173,7 @@ router.post('/create-express-dashboard-link', authMiddleware, async (req, res) =
     }
 });
 
-// 5. Trigger Instant Payout
+// 5. Trigger Manual Payout ("Payout Now" button)
 router.post('/payouts/instant', authMiddleware, async (req, res) => {
     try {
         if (!req.localUser?.stripeAccountId || !req.localUser.stripeOnboardingComplete) {
@@ -186,20 +186,28 @@ router.post('/payouts/instant', authMiddleware, async (req, res) => {
         const defaultCurrency = connectedAccount.default_currency;
         const availableBalance = balance.available.find(b => b.currency === defaultCurrency);
         if (!availableBalance || availableBalance.amount <= 0) {
-            return res.status(400).json({ message: "No available balance for an instant payout." });
+            return res.status(400).json({ message: "No available balance for a payout." });
         }
+        
+        // --- CHANGE 1: Payout Method ---
+        // Changed `method: 'instant'` to `method: 'standard'` to trigger a free, 2-5 day payout.
         const payout = await stripe.payouts.create({
-            amount: availableBalance.amount, currency: defaultCurrency, method: 'instant',
+            amount: availableBalance.amount, 
+            currency: defaultCurrency, 
+            method: 'standard',
         }, { stripeAccount: stripeAccountId });
-        res.json({ success: true, message: `Instant payout initiated.`, payoutId: payout.id });
+
+        // --- CHANGE 2: Success Message ---
+        // Updated the success message to accurately reflect the new payout type.
+        res.json({ success: true, message: `Standard payout of ${formatCurrency(payout.amount, payout.currency)} initiated. It should arrive in 2-5 business days.`, payoutId: payout.id });
+
     } catch (error) {
         console.error("[/payouts/instant] Stripe Payout Error:", error);
-        let userMessage = "Failed to initiate instant payout.";
+        let userMessage = "Failed to initiate payout.";
         if (error.type === 'StripeInvalidRequestError') {
             if (error.code === 'balance_insufficient') userMessage = "Your available balance is insufficient.";
-            else if (error.code === 'instant_payouts_unsupported') userMessage = "Instant Payouts are not supported for your bank.";
             else if (error.code === 'payouts_not_allowed') userMessage = "Payouts are currently disabled on your account.";
-            else userMessage = "Could not process payout. Ensure an eligible debit card is on file with Stripe.";
+            else userMessage = "Could not process payout. Please check your Stripe dashboard for issues.";
         }
         res.status(400).json({ message: userMessage, error: error.message });
     }
