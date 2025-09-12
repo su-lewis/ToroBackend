@@ -88,7 +88,7 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
     }
 });
 
-// 3. Create Checkout Session (Destination Charge Version)
+// 3. Create Stripe Checkout Session
 router.post('/create-checkout-session', async (req, res) => {
     try {
         if (!req.body) return res.status(400).json({ message: 'Request body is missing.' });
@@ -116,13 +116,14 @@ router.post('/create-checkout-session', async (req, res) => {
         }
         
         const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
+        const productDescription = `A one-time payment to support ${recipientUser.displayName || recipientUser.username}.`;
         
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card', 'klarna', 'link'],
             line_items: [{
                 price_data: {
                     currency: chargeCurrency,
-                    product_data: { name: productName },
+                    product_data: { name: productName, description: productDescription },
                     unit_amount: grossAmountInCents
                 },
                 quantity: 1
@@ -130,12 +131,16 @@ router.post('/create-checkout-session', async (req, res) => {
             mode: 'payment',
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${(creatorReceivesAmountInCents / 100).toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUser.username}?payment_cancelled=true`,
+            
+            // This is the correct structure for a cross-border Destination Charge.
             payment_intent_data: {
+                on_behalf_of: recipientUser.stripeAccountId,
                 transfer_data: {
                     destination: recipientUser.stripeAccountId,
-                    amount: creatorReceivesAmountInCents,
-                },
+                    amount: creatorReceivesAmountInCents
+                }
             },
+            
             billing_address_collection: 'required',
             metadata: {
                 appRecipientUserId: recipientUser.id,
@@ -145,9 +150,8 @@ router.post('/create-checkout-session', async (req, res) => {
                 paymentCurrency: chargeCurrency,
                 donorName: donorName ? donorName.substring(0, 100) : 'Anonymous',
             },
-        }); // The { stripeAccount: ... } option has been removed to make this a destination charge.
+        });
 
-        // Return the entire session object, which includes both the `id` and the `url`.
         res.json(session);
 
     } catch (error) {
