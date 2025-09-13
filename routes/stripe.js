@@ -173,7 +173,7 @@ router.post('/create-express-dashboard-link', authMiddleware, async (req, res) =
     }
 });
 
-// 5. Trigger Manual Payout ("Payout Now" button)
+// 5. Trigger a MANUAL STANDARD PAYOUT ("Payout Now" button)
 router.post('/payouts/instant', authMiddleware, async (req, res) => {
     try {
         if (!req.localUser?.stripeAccountId || !req.localUser.stripeOnboardingComplete) {
@@ -189,16 +189,12 @@ router.post('/payouts/instant', authMiddleware, async (req, res) => {
             return res.status(400).json({ message: "No available balance for a payout." });
         }
         
-        // --- CHANGE 1: Payout Method ---
-        // Changed `method: 'instant'` to `method: 'standard'` to trigger a free, 2-5 day payout.
         const payout = await stripe.payouts.create({
             amount: availableBalance.amount, 
             currency: defaultCurrency, 
-            method: 'standard',
+            method: 'standard', // This correctly triggers a free, 2-5 day payout
         }, { stripeAccount: stripeAccountId });
 
-        // --- CHANGE 2: Success Message ---
-        // Updated the success message to accurately reflect the new payout type.
         res.json({ success: true, message: `Standard payout of ${formatCurrency(payout.amount, payout.currency)} initiated. It should arrive in 2-5 business days.`, payoutId: payout.id });
 
     } catch (error) {
@@ -213,28 +209,50 @@ router.post('/payouts/instant', authMiddleware, async (req, res) => {
     }
 });
 
-// 6. Toggle Auto Payout Mode
+// 6. TOGGLE AUTOMATIC INSTANT PAYOUTS
 router.post('/payouts/toggle-mode', authMiddleware, async (req, res) => {
     try {
         if (!req.localUser?.stripeAccountId || !req.localUser.stripeOnboardingComplete) {
             return res.status(400).json({ message: "Stripe account not fully set up." });
         }
+        
         const { instantPayoutsEnabled } = req.body;
         if (typeof instantPayoutsEnabled !== 'boolean') {
             return res.status(400).json({ message: "Invalid value provided." });
         }
+
         const user = req.localUser;
         const stripeAccountId = user.stripeAccountId;
-        const stripeInterval = instantPayoutsEnabled ? 'manual' : 'daily';
+
+        // --- THIS IS THE KEY LOGIC CHANGE ---
+        // To enable our app's auto-payout webhook, we must set Stripe's schedule to manual.
+        // To disable it, we also set it to manual, so no payouts happen automatically at all.
         await stripe.accounts.update(stripeAccountId, {
-            settings: { payouts: { schedule: { interval: stripeInterval } } }
+            settings: {
+                payouts: {
+                    schedule: {
+                        interval: 'manual',
+                    }
+                }
+            }
         });
+
+        // The only thing we toggle is the flag in our own database.
         const updatedUser = await prisma.user.update({
             where: { id: user.id },
             data: { autoInstantPayoutsEnabled: instantPayoutsEnabled },
         });
-        const message = `Payout mode set to ${instantPayoutsEnabled ? "Instant" : "Standard Daily"}.`;
-        res.json({ success: true, message: message, autoInstantPayoutsEnabled: updatedUser.autoInstantPayoutsEnabled });
+
+        const message = instantPayoutsEnabled 
+            ? "Automatic Instant Payouts have been enabled." 
+            : "Automatic Instant Payouts have been disabled.";
+
+        res.json({ 
+            success: true, 
+            message: message,
+            autoInstantPayoutsEnabled: updatedUser.autoInstantPayoutsEnabled
+        });
+
     } catch (error) {
         console.error("[/payouts/toggle-mode] Error:", error);
         res.status(500).json({ message: error.message || "Failed to update payout settings." });
