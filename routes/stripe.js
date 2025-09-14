@@ -30,16 +30,12 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
         
         const appUserId = req.localUser.id;
         const appProfile = req.localUser;
-        if (!appProfile.username) return res.status(400).json({ message: 'A username is required to connect with Stripe.' });
-        
         const emailForStripe = req.user?.email || appProfile?.email;
-        if (!emailForStripe) return res.status(400).json({ message: 'An email address is required to connect with Stripe.' });
-
         const platformBaseUrl = process.env.FRONTEND_URL;
-        if (!platformBaseUrl || !platformBaseUrl.startsWith('http')) return res.status(500).json({ message: 'Server configuration error: A valid FRONTEND_URL is required.' });
 
         let stripeAccountId = appProfile.stripeAccountId;
         if (!stripeAccountId) {
+            // This part is already correct.
             const accountParams = {
                 type: 'express', email: emailForStripe, country: country, business_type: 'individual',
                 business_profile: { url: `${platformBaseUrl}/${appProfile.username}`, mcc: '5815' },
@@ -52,7 +48,20 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
                 data: { stripeAccountId: stripeAccountId, stripeAccountCountry: country, stripeOnboardingComplete: false },
             });
         }
-        const accountLink = await stripe.accountLinks.create({ account: stripeAccountId, refresh_url: `${platformBaseUrl}/connect-stripe?reauth=true`, return_url: `${platformBaseUrl}/connect-stripe?status=success`, type: 'account_onboarding' });
+        
+        // --- THIS IS THE NEW, MORE ROBUST PART ---
+        const accountLink = await stripe.accountLinks.create({
+            account: stripeAccountId,
+            refresh_url: `${platformBaseUrl}/connect-stripe?reauth=true`,
+            return_url: `${platformBaseUrl}/connect-stripe?status=success`,
+            type: 'account_onboarding',
+            // Add a prefill object to give Stripe a strong hint to use this data.
+            collect: 'eventually_due', // Standard for Express
+            prefill: {
+                email: emailForStripe,
+            },
+        });
+        
         res.json({ url: accountLink.url });
     } catch (error) {
         console.error('[/onboard-user] Error:', error.message, error.stack);

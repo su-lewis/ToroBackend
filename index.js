@@ -234,13 +234,22 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
             break;
         }
         case 'account.updated': {
-             // This logic stays here
             const account = event.data.object;
             const userToUpdate = await prisma.user.findFirst({ where: { stripeAccountId: account.id } });
+            
             if (userToUpdate) {
+                // --- THIS IS THE FIX ---
+                // We must define `onboardingComplete` by checking the account's status.
                 const onboardingComplete = !!(account.charges_enabled && account.details_submitted && account.payouts_enabled);
+
+                // Now we can safely compare the new status with the one in our database.
                 if (userToUpdate.stripeOnboardingComplete !== onboardingComplete) {
-                    await prisma.user.update({ where: { id: userToUpdate.id }, data: { stripeOnboardingComplete } });
+                    await prisma.user.update({
+                        where: { id: userToUpdate.id },
+                        // And now this variable exists and can be used.
+                        data: { stripeOnboardingComplete: onboardingComplete }
+                    });
+                    console.log(`[Connect Webhook] User ${userToUpdate.id} onboarding status updated to: ${onboardingComplete}`);
                 }
             }
             break;
