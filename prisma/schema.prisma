@@ -20,12 +20,18 @@ enum PaymentStatus {
   DISPUTED
 }
 
-// --- NEW ---
 enum PayoutStatus {
   PENDING
   PAID
   FAILED
   CANCELED
+}
+
+/// A type defining what kind of content a block on a user's page represents.
+enum PageBlockType {
+  LINK
+  WISHLIST
+  HEADER
 }
 
 // -----------------------------------------------------------------------------
@@ -55,7 +61,8 @@ model User {
   stripeOnboardingComplete  Boolean  @default(false)
   payoutsInUsd              Boolean  @default(true)
   autoInstantPayoutsEnabled Boolean  @default(false)
-
+  
+  /// Platform-specific creator settings
   hasFeeRebateBonus         Boolean  @default(false)
   
   /// Timestamps
@@ -63,8 +70,8 @@ model User {
   updatedAt DateTime @updatedAt
 
   /// Relations
-  links            Link[]
-  paymentsReceived Payment[] @relation("RecipientPayments")
+  pageBlocks       PageBlock[] // A user has many page blocks. REPLACES `links`.
+  paymentsReceived Payment[]   @relation("RecipientPayments")
   payouts          Payout[] 
 
   /// Indexes
@@ -72,17 +79,31 @@ model User {
   @@index([username])
 }
 
-model Link {
-  /// Core Fields
-  id     String @id @default(cuid())
-  title  String
-  url    String
-  order  Int?
-  clicks Int    @default(0)
+/// Represents a single, configurable block on a creator's public page.
+model PageBlock {
+  id    String  @id @default(cuid())
+  /// The type of block this is (e.g., a simple link, a wishlist item, etc.).
+  type  PageBlockType @default(LINK)
+  /// The display order of the block on the page.
+  order Int     @default(0)
+
+  /// --- Fields for all block types ---
+  title String?
+  
+  /// --- Fields specific to LINK type ---
+  url   String?
+  
+  /// --- Fields specific to WISHLIST type ---
+  priceCents   Int?
+  quantityGoal Int?    // Nullable for "unlimited" items
+  isUnlimited  Boolean @default(false)
 
   /// Relational Fields
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  /// A wishlist block can be funded by many payments.
+  payments Payment[]
 
   /// Timestamps
   createdAt DateTime @default(now())
@@ -111,6 +132,10 @@ model Payment {
   /// Relational Fields
   recipientUserId String
   recipient       User   @relation("RecipientPayments", fields: [recipientUserId], references: [id], onUpdate: Cascade, onDelete: Restrict)
+  
+  /// Relation to a specific item a fan might be purchasing.
+  pageBlockId     String?
+  pageBlock       PageBlock? @relation(fields: [pageBlockId], references: [id], onUpdate: SetNull, onDelete: SetNull)
 
   /// Timestamps
   createdAt DateTime @default(now())
@@ -118,6 +143,7 @@ model Payment {
 
   /// Indexes
   @@index([recipientUserId])
+  @@index([pageBlockId])
 }
 
 model Payout {
@@ -143,16 +169,15 @@ model Payout {
 
 model FailedPaymentAttempt {
   id              String   @id @default(cuid())
-  stripePiId      String   @unique // Payment Intent ID
+  stripePiId      String   @unique
   amount          Int
   currency        String
   recipientUserId String
-  failureCode     String?  // e.g., 'card_declined'
+  failureCode     String?
   failureMessage  String?
 
   createdAt       DateTime @default(now())
 
-  // Note: We don't link this to a User model to keep it simple,
-  // but you could add a relation if you wanted to analyze per-user failures.
+  /// Indexes
   @@index([recipientUserId])
 }

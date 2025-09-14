@@ -92,7 +92,9 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
 router.post('/create-checkout-session', async (req, res) => {
     try {
         if (!req.body) return res.status(400).json({ message: 'Request body is missing.' });
-        const { amount: amountForCreatorDollars, recipientUsername, donorName } = req.body;
+        
+        // --- CHANGE 1: Destructure `pageBlockId` from the request body ---
+        const { amount: amountForCreatorDollars, recipientUsername, donorName, pageBlockId } = req.body;
 
         const recipientUser = await prisma.user.findUnique({
             where: { username: recipientUsername },
@@ -104,26 +106,53 @@ router.post('/create-checkout-session', async (req, res) => {
         }
 
         let chargeCurrency = recipientUser.payoutsInUsd ? 'usd' : (recipientUser.stripeDefaultCurrency || 'usd');
-        
-        const creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
+        let creatorReceivesAmountInCents;
+        let productName;
+
+        // --- CHANGE 2: Conditional logic for Wishlist vs. Generic Tip ---
+        if (pageBlockId) {
+            // This is a Wishlist Item purchase
+            const wishlistItem = await prisma.pageBlock.findFirst({
+                where: { id: pageBlockId, userId: recipientUser.id, type: 'WISHLIST' },
+                include: { _count: { select: { payments: true } } }
+            });
+            if (!wishlistItem) return res.status(404).json({ message: 'Wishlist item not found.' });
+
+            // Check if the goal has been met
+            if (!wishlistItem.isUnlimited && wishlistItem._count.payments >= wishlistItem.quantityGoal) {
+                return res.status(400).json({ message: 'This wishlist item goal has already been met.' });
+            }
+            
+            creatorReceivesAmountInCents = wishlistItem.priceCents;
+            productName = `Funding: ${wishlistItem.title}`;
+        } else {
+            // This is a generic tip, use the amount from the form
+            if (!amountForCreatorDollars || isNaN(parseFloat(amountForCreatorDollars)) || 
+                parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT ||
+                parseFloat(amountForCreatorDollars) > MAXIMUM_SEND_AMOUNT
+            ) {
+                return res.status(400).json({ 
+                    message: `A valid amount (min ${MINIMUM_SEND_AMOUNT.toFixed(2)}, max ${MAXIMUM_SEND_AMOUNT.toFixed(2)}) is required.` 
+                });
+            }
+            creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
+            productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
+        }
+
         const platformFeeInCents = Math.round((creatorReceivesAmountInCents * PLATFORM_FEE_PERCENTAGE) + PLATFORM_FEE_FIXED_CENTS);
         const grossAmountInCents = creatorReceivesAmountInCents + platformFeeInCents;
         
         const MINIMUM_CHARGE_CENTS = { 'usd': 50, 'cad': 50, 'aud': 50, 'gbp': 30, 'eur': 50 };
-        const minChargeInCents = MINIMUM_CHARGE_CENTS[chargeCurrency] || 50;
-        if (grossAmountInCents < minChargeInCents) {
+        if (grossAmountInCents < (MINIMUM_CHARGE_CENTS[chargeCurrency] || 50)) {
             return res.status(400).json({ message: `The total charge amount is below the minimum.` });
         }
-        
-        const productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
-        const productDescription = `A one-time payment to support ${recipientUser.displayName || recipientUser.username}.`;
         
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card', 'klarna', 'link'],
             line_items: [{
                 price_data: {
                     currency: chargeCurrency,
-                    product_data: { name: productName, description: productDescription },
+                    product_data: { name: productName },
                     unit_amount: grossAmountInCents
                 },
                 quantity: 1
@@ -131,8 +160,6 @@ router.post('/create-checkout-session', async (req, res) => {
             mode: 'payment',
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${(creatorReceivesAmountInCents / 100).toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUser.username}?payment_cancelled=true`,
-            
-            // This is the correct structure for a cross-border Destination Charge.
             payment_intent_data: {
                 on_behalf_of: recipientUser.stripeAccountId,
                 transfer_data: {
@@ -140,7 +167,6 @@ router.post('/create-checkout-session', async (req, res) => {
                     amount: creatorReceivesAmountInCents
                 }
             },
-            
             billing_address_collection: 'required',
             metadata: {
                 appRecipientUserId: recipientUser.id,
@@ -149,6 +175,8 @@ router.post('/create-checkout-session', async (req, res) => {
                 platformFeeCalculated: platformFeeInCents.toString(),
                 paymentCurrency: chargeCurrency,
                 donorName: donorName ? donorName.substring(0, 100) : 'Anonymous',
+                // --- CHANGE 3: Add `pageBlockId` to metadata if it exists ---
+                pageBlockId: pageBlockId || null,
             },
         });
 

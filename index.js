@@ -86,6 +86,7 @@ app.post('/api/stripe/account-webhook', express.raw({ type: 'application/json' }
                             netAmountToRecipient: intendedAmountForCreator,
                             payerName: metadata.donorName || 'Anonymous',
                             payerEmail: session.customer_details?.email,
+                            pageBlockId: metadata.pageBlockId || undefined,
                         },
                     });
                     console.log(`[Account Webhook] Payment record created from session ${session.id} for PI ${paymentIntentId}.`);
@@ -253,7 +254,7 @@ app.use(express.json());
 
 const stripeRoutes = require('./routes/stripe');
 const userRoutes = require('./routes/users');
-const linkRoutes = require('./routes/links');
+const pageBlockRoutes = require('./routes/pageBlocks');
 const publicProfileRoutes = require('./routes/publicProfile');
 const paymentRoutes = require('./routes/payments');
 const { authMiddleware } = require('./middleware/auth');
@@ -262,7 +263,7 @@ app.use('/api/stripe', stripeRoutes);
 app.use('/api/public', publicProfileRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/payments', authMiddleware, paymentRoutes);
-app.use('/api/links', authMiddleware, linkRoutes);
+app.use('/api/page-blocks', authMiddleware, pageBlockRoutes);
 
 app.get('/api', (req, res) => res.status(200).json({ status: 'healthy' }));
 

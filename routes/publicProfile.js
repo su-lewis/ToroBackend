@@ -1,4 +1,3 @@
-// backend/routes/publicProfile.js
 const express = require('express');
 const router = express.Router();
 const prisma = require('../lib/prisma');
@@ -21,9 +20,14 @@ router.get('/profile/:username', async (req, res) => {
         stripeOnboardingComplete: true,
         payoutsInUsd: true,           
         stripeDefaultCurrency: true,
-        links: {
+        // --- THIS IS THE CHANGE ---
+        pageBlocks: {
           orderBy: { order: 'asc' },
-          select: { id: true, title: true, url: true }
+          include: {
+            _count: {
+              select: { payments: true }
+            }
+          }
         }
       }
     });
