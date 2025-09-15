@@ -38,9 +38,7 @@ router.get('/me', authMiddleware, async (req, res) => {
   res.json(req.localUser);
 });
 
-
 // POST Create or Update user's application profile
-// --- THIS IS THE FIX ---
 router.post('/profile', authMiddleware, async (req, res) => {
   const {
     username,
@@ -56,53 +54,45 @@ router.post('/profile', authMiddleware, async (req, res) => {
     return res.status(401).json({ message: "Authentication error: Supabase user ID missing." });
   }
   const supabaseAuthId = req.user.id;
-  const email = req.user.email; // Get email from the authenticated Supabase user
+  const email = req.user.email;
 
-  // Username validation remains the same
-  if (username !== undefined) {
-    if (typeof username !== 'string' || username.trim() === '') {
-      return res.status(400).json({ message: "Username cannot be empty." });
+  // --- THIS IS THE FIX (Part 1): Build the update object dynamically ---
+  const profileData = {};
+  if (username !== undefined) profileData.username = username.trim();
+  if (displayName !== undefined) profileData.displayName = displayName;
+  if (bio !== undefined) profileData.bio = bio;
+  // An empty string means "remove the image", which Prisma will save as `null`
+  if (profileImageUrl !== undefined) profileData.profileImageUrl = profileImageUrl || null;
+  if (bannerImageUrl !== undefined) profileData.bannerImageUrl = bannerImageUrl || null;
+  if (profileBackgroundColor !== undefined) profileData.profileBackgroundColor = profileBackgroundColor;
+  if (payoutsInUsd !== undefined) profileData.payoutsInUsd = payoutsInUsd;
+  
+  // --- Validation logic is now separate and more targeted ---
+  if (profileData.username) {
+    if (profileData.username.trim() === '') return res.status(400).json({ message: "Username cannot be empty." });
+    if (!/^[a-zA-Z0-9_.-]{3,20}$/.test(profileData.username)) {
+      return res.status(400).json({ message: "Username must be 3-20 characters long." });
     }
-    const trimmedUsername = username.trim();
-    if (!/^[a-zA-Z0-9_.-]{3,20}$/.test(trimmedUsername)) {
-      return res.status(400).json({ message: "Username must be 3-20 characters (letters, numbers, _, ., -)." });
-    }
-    const existingUserByUsername = await prisma.user.findFirst({
-      where: {
-        username: { equals: trimmedUsername, mode: 'insensitive' },
+    const existingUser = await prisma.user.findFirst({
+      where: { 
+        username: { equals: profileData.username, mode: 'insensitive' },
         NOT: { supabaseAuthId: supabaseAuthId }
       },
     });
-    if (existingUserByUsername) {
-      return res.status(409).json({ message: "Username is already taken by another user." });
-    }
-  } else {
-    // If it's a new user, username MUST be provided
-    const existingProfile = await prisma.user.findUnique({ where: { supabaseAuthId }});
-    if (!existingProfile) {
-        return res.status(400).json({ message: "A username is required to create your profile." });
-    }
+    if (existingUser) return res.status(409).json({ message: "Username is already taken." });
   }
 
   try {
-    const profileData = {
-      username: username?.trim(),
-      displayName,
-      bio,
-      profileImageUrl,
-      bannerImageUrl,
-      profileBackgroundColor,
-      payoutsInUsd
-    };
-
-    // Use `upsert` instead of `update`
+    // --- THIS IS THE FIX (Part 2): Use the dynamically created `profileData` object ---
     const userProfile = await prisma.user.upsert({
       where: { supabaseAuthId: supabaseAuthId },
-      update: profileData, // Data for updating an existing profile
-      create: {          // Data for creating a new profile
+      update: profileData, // This now only contains the fields that were sent
+      create: {
         supabaseAuthId: supabaseAuthId,
         email: email,
-        ...profileData, // Spread the rest of the profile data
+        // The create object needs a username, so we must validate it's present on the first save
+        username: profileData.username,
+        ...profileData,
       },
     });
 
@@ -113,8 +103,11 @@ router.post('/profile', authMiddleware, async (req, res) => {
     if (error.code === 'P2002' && error.meta?.target?.includes('username')) {
       return res.status(409).json({ message: "This username is already registered." });
     }
-    // The 'P2025' error will no longer happen because of upsert
-    res.status(500).json({ message: "An error occurred while saving the profile.", error: error.message });
+    // Handle the case where a user is being created without a username
+    if (error instanceof Prisma.PrismaClientValidationError && error.message.includes("Argument `username` is missing")) {
+        return res.status(400).json({ message: "A username is required to create your profile." });
+    }
+    res.status(500).json({ message: "An error occurred while saving the profile." });
   }
 });
 
