@@ -31,13 +31,18 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
         const appUserId = req.localUser.id;
         const appProfile = req.localUser;
         const emailForStripe = req.user?.email || appProfile?.email;
+        if (!emailForStripe) return res.status(400).json({ message: 'An email address is required.' });
+
         const platformBaseUrl = process.env.FRONTEND_URL;
+        if (!platformBaseUrl) return res.status(500).json({ message: 'Server configuration error.' });
 
         let stripeAccountId = appProfile.stripeAccountId;
         if (!stripeAccountId) {
-            // This part is already correct.
             const accountParams = {
-                type: 'express', email: emailForStripe, country: country, business_type: 'individual',
+                type: 'express', 
+                email: emailForStripe, // This is the correct place to provide the email
+                country: country, 
+                business_type: 'individual',
                 business_profile: { url: `${platformBaseUrl}/${appProfile.username}`, mcc: '5815' },
                 capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
             };
@@ -45,21 +50,17 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
             stripeAccountId = account.id;
             await prisma.user.update({
                 where: { id: appUserId },
-                data: { stripeAccountId: stripeAccountId, stripeAccountCountry: country, stripeOnboardingComplete: false },
+                data: { stripeAccountId: stripeAccountId, stripeAccountCountry: country },
             });
         }
         
-        // --- THIS IS THE NEW, MORE ROBUST PART ---
+        // --- THIS IS THE FIX ---
+        // The `accountLinks.create` call should be simple and contain only the required parameters.
         const accountLink = await stripe.accountLinks.create({
             account: stripeAccountId,
             refresh_url: `${platformBaseUrl}/connect-stripe?reauth=true`,
             return_url: `${platformBaseUrl}/connect-stripe?status=success`,
             type: 'account_onboarding',
-            // Add a prefill object to give Stripe a strong hint to use this data.
-            collect: 'eventually_due', // Standard for Express
-            prefill: {
-                email: emailForStripe,
-            },
         });
         
         res.json({ url: accountLink.url });
