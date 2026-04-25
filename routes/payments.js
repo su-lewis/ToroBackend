@@ -1,30 +1,30 @@
 // backend/routes/payments.js
 const express = require('express');
 const router = express.Router();
-const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
+const { supabaseAdmin } = require('../lib/supabase');
 const { subDays, startOfDay } = require('date-fns');
 
 // Helper function to abstract the database query for payment stats.
 // This avoids repeating the same aggregation logic.
 const getPaymentStats = async (userId, currency, dateFilter = {}) => {
-  const stats = await prisma.payment.aggregate({
-    where: {
-      recipientUserId: userId,
-      status: 'SUCCEEDED',
-      currency: currency.toLowerCase(),
-      ...dateFilter, // Spread the date filter if it exists
-    },
-    _sum: {
-      netAmountToRecipient: true,
-    },
-    _count: {
-      id: true,
-    },
-  });
+  let query = supabaseAdmin
+    .from('Payment')
+    .select('netAmountToRecipient', { count: 'exact' })
+    .eq('recipientUserId', userId)
+    .eq('status', 'SUCCEEDED')
+    .eq('currency', currency.toLowerCase());
+
+  if (dateFilter.createdAt?.gte) {
+    query = query.gte('createdAt', dateFilter.createdAt.gte);
+  }
+
+  const { data, error, count } = await query.range(0, 9999);
+  if (error) throw error;
+
   return {
-    revenueCents: stats._sum.netAmountToRecipient || 0,
-    giftCount: stats._count.id || 0,
+    revenueCents: (data || []).reduce((sum, row) => sum + (row.netAmountToRecipient || 0), 0),
+    giftCount: count || 0,
   };
 };
 
@@ -84,36 +84,23 @@ router.get('/history', authMiddleware, async (req, res) => {
 
     try {
         // 1. Fetch recent payments (including non-succeeded ones)
-        const payments = await prisma.payment.findMany({
-            where: { 
-                recipientUserId: userId,
-                status: { in: ['SUCCEEDED', 'REFUNDED', 'DISPUTED'] }
-            },
-            select: {
-                id: true,
-                createdAt: true,
-                status: true,
-                netAmountToRecipient: true,
-                currency: true,
-                payerName: true
-            },
-            orderBy: { createdAt: 'desc' },
-            take: 50,
-        });
+        const { data: payments, error: paymentsError } = await supabaseAdmin
+          .from('Payment')
+          .select('id,createdAt,status,netAmountToRecipient,currency,payerName')
+          .eq('recipientUserId', userId)
+          .in('status', ['SUCCEEDED', 'REFUNDED', 'DISPUTED'])
+          .order('createdAt', { ascending: false })
+          .limit(50);
+        if (paymentsError) throw paymentsError;
 
         // 2. Fetch recent payouts
-        const payouts = await prisma.payout.findMany({
-            where: { userId: userId },
-            select: {
-                id: true,
-                createdAt: true,
-                status: true,
-                amount: true,
-                currency: true,
-            },
-            orderBy: { createdAt: 'desc' },
-            take: 50,
-        });
+        const { data: payouts, error: payoutsError } = await supabaseAdmin
+          .from('Payout')
+          .select('id,createdAt,status,amount,currency')
+          .eq('userId', userId)
+          .order('createdAt', { ascending: false })
+          .limit(50);
+        if (payoutsError) throw payoutsError;
 
         // 3. Map payments to a common, standardized format
         const formattedPayments = payments.map(p => ({

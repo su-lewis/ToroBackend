@@ -1,9 +1,6 @@
 // File: backend/middleware/auth.js (Final Corrected Version)
 
-const { createClient } = require('@supabase/supabase-js');
-const prisma = require('../lib/prisma');
-
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+const { supabaseAdmin } = require('../lib/supabase');
 
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -30,32 +27,18 @@ const authMiddleware = async (req, res, next) => {
 
     req.user = user;
 
-    // --- THIS IS THE FIX ---
-    // The select statement has been updated to only include fields that exist
-    // in your final, cleaned-up schema.prisma file.
-    const localUser = await prisma.user.findUnique({
-      where: { supabaseAuthId: user.id },
-      select: {
-        id: true,
-        supabaseAuthId: true,
-        email: true,
-        username: true,
-        displayName: true,
-        bio: true,
-        profileImageUrl: true,
-        bannerImageUrl: true,
-        profileBackgroundColor: true,
-        payoutsInUsd: true,
-        autoInstantPayoutsEnabled: true, // <-- The correct field name
-        stripeAccountId: true,
-        stripeOnboardingComplete: true,
-        stripeAccountCountry: true,
-        stripeDefaultCurrency: true,
-        createdAt: true,
-        updatedAt: true,
-      }
-    });
-    
+    // --- Fetch the local user profile from Supabase using only the application fields we need.
+    const { data: localUser, error: localUserError } = await supabaseAdmin.from('User').select(
+      `id, supabaseAuthId, email, username, displayName, bio, profileImageUrl, bannerImageUrl,
+       profileBackgroundColor, payoutsInUsd, autoInstantPayoutsEnabled, stripeAccountId,
+       stripeOnboardingComplete, stripeAccountCountry, stripeDefaultCurrency, createdAt, updatedAt`
+    ).eq('supabaseAuthId', user.id).single();
+
+    if (localUserError && localUserError.code !== 'PGRST116') {
+      console.error('Supabase local user lookup error:', localUserError);
+      return res.status(500).json({ message: 'Failed to load local user profile.' });
+    }
+
     req.localUser = localUser;
 
     next();

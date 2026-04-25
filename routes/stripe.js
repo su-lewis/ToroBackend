@@ -10,7 +10,7 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY, {
         url: process.env.FRONTEND_URL || 'https://tributetoro.com'
     }
 });
-const prisma = require('../lib/prisma');
+const { supabaseAdmin } = require('../lib/supabase');
 const { authMiddleware } = require('../middleware/auth');
 
 // --- Constants ---
@@ -43,10 +43,12 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
             };
             const account = await stripe.accounts.create(accountParams);
             stripeAccountId = account.id;
-            await prisma.user.update({
-                where: { id: appUserId },
-                data: { stripeAccountId: stripeAccountId, stripeAccountCountry: country, stripeOnboardingComplete: false },
-            });
+            const { error: updateError } = await supabaseAdmin.from('User').update({
+                stripeAccountId: stripeAccountId,
+                stripeAccountCountry: country,
+                stripeOnboardingComplete: false,
+            }).eq('id', appUserId);
+            if (updateError) throw updateError;
         }
         
         // --- THIS IS THE NEW, MORE ROBUST PART ---
@@ -77,14 +79,12 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
         if (!user.stripeAccountId) return res.status(404).json({ message: 'Stripe account not connected for this user.' });
         const account = await stripe.accounts.retrieve(user.stripeAccountId);
         const onboardingComplete = !!(account.charges_enabled && account.details_submitted && account.payouts_enabled);
-        await prisma.user.update({
-            where: { id: user.id },
-            data: {
-                stripeOnboardingComplete: onboardingComplete,
-                stripeDefaultCurrency: account.default_currency,
-                stripeAccountCountry: account.country,
-            },
-        });
+        const { error: updateError } = await supabaseAdmin.from('User').update({
+            stripeOnboardingComplete: onboardingComplete,
+            stripeDefaultCurrency: account.default_currency,
+            stripeAccountCountry: account.country,
+        }).eq('id', user.id);
+        if (updateError) throw updateError;
         res.json({
             stripeAccountId: user.stripeAccountId, detailsSubmitted: account.details_submitted,
             chargesEnabled: account.charges_enabled, payoutsEnabled: account.payouts_enabled,
@@ -105,10 +105,18 @@ router.post('/create-checkout-session', async (req, res) => {
         // --- CHANGE 1: Destructure `pageBlockId` from the request body ---
         const { amount: amountForCreatorDollars, recipientUsername, donorName, pageBlockId } = req.body;
 
-        const recipientUser = await prisma.user.findUnique({
-            where: { username: recipientUsername },
-            select: { id: true, username: true, displayName: true, stripeAccountId: true, stripeOnboardingComplete: true, payoutsInUsd: true, stripeDefaultCurrency: true }
-        });
+        const { data: recipientUser, error: recipientError } = await supabaseAdmin
+          .from('User')
+          .select('id,username,displayName,stripeAccountId,stripeOnboardingComplete,payoutsInUsd,stripeDefaultCurrency')
+          .eq('username', recipientUsername)
+          .single();
+
+        if (recipientError) {
+          if (recipientError.code === 'PGRST116') {
+            return res.status(400).json({ message: 'This creator is not set up for payments.' });
+          }
+          throw recipientError;
+        }
 
         if (!recipientUser || !recipientUser.stripeAccountId || !recipientUser.stripeOnboardingComplete) {
             return res.status(400).json({ message: 'This creator is not set up for payments.' });
@@ -121,11 +129,28 @@ router.post('/create-checkout-session', async (req, res) => {
         // --- CHANGE 2: Conditional logic for Wishlist vs. Generic Tip ---
         if (pageBlockId) {
             // This is a Wishlist Item purchase
-            const wishlistItem = await prisma.pageBlock.findFirst({
-                where: { id: pageBlockId, userId: recipientUser.id, type: 'WISHLIST' },
-                include: { _count: { select: { payments: true } } }
-            });
+            const { data: wishlistItem, error: wishlistError } = await supabaseAdmin
+              .from('PageBlock')
+              .select('*, payments(id)')
+              .eq('id', pageBlockId)
+              .eq('userId', recipientUser.id)
+              .eq('type', 'WISHLIST')
+              .single();
+            if (wishlistError) {
+              if (wishlistError.code === 'PGRST116') {
+                return res.status(404).json({ message: 'Wishlist item not found.' });
+              }
+              throw wishlistError;
+            }
             if (!wishlistItem) return res.status(404).json({ message: 'Wishlist item not found.' });
+            
+            const paymentCount = wishlistItem.payments?.length || 0;
+            if (!wishlistItem.isUnlimited && paymentCount >= wishlistItem.quantityGoal) {
+              return res.status(400).json({ message: 'This wishlist item goal has already been met.' });
+            }
+            
+            creatorReceivesAmountInCents = wishlistItem.priceCents;
+            productName = `Funding: ${wishlistItem.title}`;
 
             // Check if the goal has been met
             if (!wishlistItem.isUnlimited && wishlistItem._count.payments >= wishlistItem.quantityGoal) {
@@ -275,10 +300,13 @@ router.post('/payouts/toggle-mode', authMiddleware, async (req, res) => {
         });
 
         // The only thing we toggle is the flag in our own database.
-        const updatedUser = await prisma.user.update({
-            where: { id: user.id },
-            data: { autoInstantPayoutsEnabled: instantPayoutsEnabled },
-        });
+        const { data: updatedUser, error: updateError } = await supabaseAdmin
+          .from('User')
+          .update({ autoInstantPayoutsEnabled: instantPayoutsEnabled })
+          .eq('id', user.id)
+          .select()
+          .single();
+        if (updateError) throw updateError;
 
         const message = instantPayoutsEnabled 
             ? "Automatic Instant Payouts have been enabled." 

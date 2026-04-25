@@ -1,43 +1,37 @@
 const express = require('express');
 const router = express.Router();
-const prisma = require('../lib/prisma');
+const { supabaseAdmin } = require('../lib/supabase');
 
 // GET public profile by username
 router.get('/profile/:username', async (req, res) => {
   const { username } = req.params;
   try {
-    const user = await prisma.user.findUnique({
-      where: { username: username },
-      select: {
-        id: true,
-        username: true,
-        displayName: true,
-        bio: true,
-        profileImageUrl: true,
-		    bannerImageUrl: true,
-        profileBackgroundColor: true,
-        stripeAccountId: true,
-        stripeOnboardingComplete: true,
-        payoutsInUsd: true,           
-        stripeDefaultCurrency: true,
-        // --- THIS IS THE CHANGE ---
-        pageBlocks: {
-          orderBy: { order: 'asc' },
-          include: {
-            _count: {
-              select: { payments: true }
-            }
-          }
-        }
-      }
-    });
+    const { data: user, error: userError } = await supabaseAdmin
+      .from('User')
+      .select('id,username,displayName,bio,profileImageUrl,bannerImageUrl,profileBackgroundColor,stripeAccountId,stripeOnboardingComplete,payoutsInUsd,stripeDefaultCurrency')
+      .eq('username', username)
+      .single();
 
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+    if (userError) {
+      if (userError.code === 'PGRST116' || userError.details?.includes('No rows found')) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+      throw userError;
     }
-    res.json(user);
-  } catch (error) {
-    console.error("Error fetching public profile:", error);
+
+    const { data: pageBlocks, error: blocksError } = await supabaseAdmin
+      .from('PageBlock')
+      .select('*, payments(id)')
+      .eq('userId', user.id)
+      .order('order', { ascending: true });
+    if (blocksError) throw blocksError;
+
+    const blocksWithCounts = (pageBlocks || []).map(({ payments, ...block }) => ({
+      ...block,
+      _count: { payments: payments?.length ?? 0 }
+    }));
+
+    res.json({ ...user, pageBlocks: blocksWithCounts });
     res.status(500).json({ message: 'Error fetching public profile', error: error.message });
   }
 });

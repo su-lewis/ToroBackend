@@ -2,7 +2,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const prisma = require('./lib/prisma');
+const { supabaseAdmin } = require('./lib/supabase');
 const { Resend } = require('resend');
 // Initialize Stripe and Resend directly in this file
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
@@ -71,24 +71,29 @@ app.post('/api/stripe/account-webhook', express.raw({ type: 'application/json' }
 
             // Step 1: Create the payment record. This is our source of truth.
             try {
-                const existingPayment = await prisma.payment.findUnique({ where: { stripePaymentIntentId: paymentIntentId } });
+                const { data: existingPayment, error: findError } = await supabaseAdmin
+                    .from('Payment')
+                    .select('stripePaymentIntentId')
+                    .eq('stripePaymentIntentId', paymentIntentId)
+                    .maybeSingle();
+                if (findError) throw findError;
+
                 if (!existingPayment) {
                     const intendedAmountForCreator = parseInt(metadata.intendedAmountForCreator, 10);
                     const grossAmountChargedToDonor = parseInt(metadata.grossAmountChargedToDonor, 10);
-                    await prisma.payment.create({
-                        data: {
-                            stripePaymentIntentId: paymentIntentId,
-                            amount: grossAmountChargedToDonor,
-                            currency: session.currency.toLowerCase(),
-                            status: 'SUCCEEDED',
-                            recipientUserId: appRecipientUserId,
-                            platformFee: grossAmountChargedToDonor - intendedAmountForCreator,
-                            netAmountToRecipient: intendedAmountForCreator,
-                            payerName: metadata.donorName || 'Anonymous',
-                            payerEmail: session.customer_details?.email,
-                            pageBlockId: metadata.pageBlockId || undefined,
-                        },
-                    });
+                    const { error: insertError } = await supabaseAdmin.from('Payment').insert([{
+                        stripePaymentIntentId: paymentIntentId,
+                        amount: grossAmountChargedToDonor,
+                        currency: session.currency.toLowerCase(),
+                        status: 'SUCCEEDED',
+                        recipientUserId: appRecipientUserId,
+                        platformFee: grossAmountChargedToDonor - intendedAmountForCreator,
+                        netAmountToRecipient: intendedAmountForCreator,
+                        payerName: metadata.donorName || 'Anonymous',
+                        payerEmail: session.customer_details?.email,
+                        pageBlockId: metadata.pageBlockId || undefined,
+                    }]);
+                    if (insertError) throw insertError;
                     console.log(`[Account Webhook] Payment record created from session ${session.id} for PI ${paymentIntentId}.`);
                 }
             } catch (dbError) {
@@ -98,7 +103,13 @@ app.post('/api/stripe/account-webhook', express.raw({ type: 'application/json' }
 
             // Step 2: Handle secondary actions.
             try {
-                const creator = await prisma.user.findUnique({ where: { id: appRecipientUserId }, select: { email: true, hasFeeRebateBonus: true, stripeAccountId: true }});
+                const { data: creator, error: creatorError } = await supabaseAdmin
+                    .from('User')
+                    .select('email,hasFeeRebateBonus,stripeAccountId')
+                    .eq('id', appRecipientUserId)
+                    .single();
+                if (creatorError) throw creatorError;
+
                 if (creator) {
                     // Bonus Logic
                     if (creator.hasFeeRebateBonus) {
@@ -154,73 +165,89 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
         case 'payment_intent.payment_failed': {
             // This logic can stay if you need to track failures
             const failedPI = event.data.object;
-            await prisma.failedPaymentAttempt.create({
-                data: {
-                    stripePiId: failedPI.id, amount: failedPI.amount, currency: failedPI.currency,
-                    recipientUserId: failedPI.metadata?.appRecipientUserId || 'unknown',
-                    failureCode: failedPI.last_payment_error?.code,
-                    failureMessage: failedPI.last_payment_error?.message,
-                }
-            }).catch(err => console.error(`[Connect Webhook] DB Error logging failed payment:`, err));
+            const { error: failedAttemptError } = await supabaseAdmin.from('FailedPaymentAttempt').insert([{
+                stripePiId: failedPI.id,
+                amount: failedPI.amount,
+                currency: failedPI.currency,
+                recipientUserId: failedPI.metadata?.appRecipientUserId || 'unknown',
+                failureCode: failedPI.last_payment_error?.code,
+                failureMessage: failedPI.last_payment_error?.message,
+            }]);
+            if (failedAttemptError) console.error(`[Connect Webhook] DB Error logging failed payment:`, failedAttemptError);
             break;
         }
         case 'charge.refunded': {
             // This logic stays here
             const refund = event.data.object;
-            await prisma.payment.update({
-                where: { stripePaymentIntentId: refund.payment_intent }, data: { status: 'REFUNDED' },
-            }).catch(err => console.error(`[Connect Webhook] DB Error on charge.refunded:`, err));
+            const { error: updateError } = await supabaseAdmin.from('Payment').update({ status: 'REFUNDED' }).eq('stripePaymentIntentId', refund.payment_intent);
+            if (updateError) console.error(`[Connect Webhook] DB Error on charge.refunded:`, updateError);
             break;
         }
         case 'charge.dispute.created': {
              // This logic stays here
             const dispute = event.data.object;
-            await prisma.payment.update({
-                where: { stripePaymentIntentId: dispute.payment_intent }, data: { status: 'DISPUTED' },
-            }).catch(err => console.error(`[Connect Webhook] DB Error on charge.dispute.created:`, err));
+            const { error: disputeError } = await supabaseAdmin.from('Payment').update({ status: 'DISPUTED' }).eq('stripePaymentIntentId', dispute.payment_intent);
+            if (disputeError) console.error(`[Connect Webhook] DB Error on charge.dispute.created:`, disputeError);
             break;
         }
         case 'charge.dispute.closed': {
              // This logic stays here
             const closedDispute = event.data.object;
             const newStatus = closedDispute.status === 'won' ? 'SUCCEEDED' : 'FAILED';
-            await prisma.payment.update({
-                where: { stripePaymentIntentId: closedDispute.payment_intent }, data: { status: newStatus },
-            }).catch(err => console.error(`[Connect Webhook] DB Error on charge.dispute.closed:`, err));
+            const { error: closedError } = await supabaseAdmin.from('Payment').update({ status: newStatus }).eq('stripePaymentIntentId', closedDispute.payment_intent);
+            if (closedError) console.error(`[Connect Webhook] DB Error on charge.dispute.closed:`, closedError);
             break;
         }
         case 'payout.paid': {
              // This logic stays here
             const payout = event.data.object;
-            const user = await prisma.user.findFirst({ where: { stripeAccountId: event.account } });
+            const { data: user, error: userError } = await supabaseAdmin.from('User').select('id').eq('stripeAccountId', event.account).maybeSingle();
+            if (userError) {
+                console.error(`[Connect Webhook] User lookup error on payout.paid:`, userError);
+                break;
+            }
             if (user) {
-                await prisma.payout.create({
-                    data: {
-                        stripePayoutId: payout.id, amount: payout.amount, currency: payout.currency,
-                        status: 'PAID', arrivalDate: new Date(payout.arrival_date * 1000), userId: user.id,
-                    }
-                }).catch(err => console.error(`[Connect Webhook] DB Error on payout.paid:`, err));
+                const { error: payoutError } = await supabaseAdmin.from('Payout').insert([{
+                    stripePayoutId: payout.id,
+                    amount: payout.amount,
+                    currency: payout.currency,
+                    status: 'PAID',
+                    arrivalDate: new Date(payout.arrival_date * 1000).toISOString(),
+                    userId: user.id,
+                }]);
+                if (payoutError) console.error(`[Connect Webhook] DB Error on payout.paid:`, payoutError);
             }
             break;
         }
         case 'payout.failed': {
              // This logic stays here
             const payout = event.data.object;
-            const user = await prisma.user.findFirst({ where: { stripeAccountId: event.account } });
+            const { data: user, error: userError } = await supabaseAdmin.from('User').select('id').eq('stripeAccountId', event.account).maybeSingle();
+            if (userError) {
+                console.error(`[Connect Webhook] User lookup error on payout.failed:`, userError);
+                break;
+            }
             if (user) {
-                await prisma.payout.create({
-                    data: {
-                        stripePayoutId: payout.id, amount: payout.amount, currency: payout.currency,
-                        status: 'FAILED', failureReason: payout.failure_message, userId: user.id,
-                    }
-                }).catch(err => console.error(`[Connect Webhook] DB Error on payout.failed:`, err));
+                const { error: payoutError } = await supabaseAdmin.from('Payout').insert([{
+                    stripePayoutId: payout.id,
+                    amount: payout.amount,
+                    currency: payout.currency,
+                    status: 'FAILED',
+                    failureReason: payout.failure_message,
+                    userId: user.id,
+                }]);
+                if (payoutError) console.error(`[Connect Webhook] DB Error on payout.failed:`, payoutError);
             }
             break;
         }
         case 'balance.available': {
              // This logic stays here
             const stripeAccountId = event.account;
-            const user = await prisma.user.findFirst({ where: { stripeAccountId } });
+            const { data: user, error: userError } = await supabaseAdmin.from('User').select('id,autoInstantPayoutsEnabled,stripeDefaultCurrency').eq('stripeAccountId', stripeAccountId).maybeSingle();
+            if (userError) {
+                console.error(`[Connect Webhook] User lookup error on balance.available:`, userError);
+                break;
+            }
             if (user && user.autoInstantPayoutsEnabled) {
                 const balance = event.data.object;
                 const availableBalance = balance.available.find(b => b.currency === user.stripeDefaultCurrency);
@@ -235,8 +262,11 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
         }
         case 'account.updated': {
             const account = event.data.object;
-            const userToUpdate = await prisma.user.findFirst({ where: { stripeAccountId: account.id } });
-            
+            const { data: userToUpdate, error: userError } = await supabaseAdmin.from('User').select('id,stripeOnboardingComplete').eq('stripeAccountId', account.id).maybeSingle();
+            if (userError) {
+                console.error(`[Connect Webhook] User lookup error on account.updated:`, userError);
+                break;
+            }
             if (userToUpdate) {
                 // --- THIS IS THE FIX ---
                 // We must define `onboardingComplete` by checking the account's status.
@@ -244,11 +274,8 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
 
                 // Now we can safely compare the new status with the one in our database.
                 if (userToUpdate.stripeOnboardingComplete !== onboardingComplete) {
-                    await prisma.user.update({
-                        where: { id: userToUpdate.id },
-                        // And now this variable exists and can be used.
-                        data: { stripeOnboardingComplete: onboardingComplete }
-                    });
+                    const { error: updateError } = await supabaseAdmin.from('User').update({ stripeOnboardingComplete: onboardingComplete }).eq('id', userToUpdate.id);
+                    if (updateError) console.error(`[Connect Webhook] DB Error updating onboarding status:`, updateError);
                     console.log(`[Connect Webhook] User ${userToUpdate.id} onboarding status updated to: ${onboardingComplete}`);
                 }
             }

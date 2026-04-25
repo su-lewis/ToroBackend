@@ -2,15 +2,12 @@
 
 const express = require('express');
 const router = express.Router();
-const prisma = require('../lib/prisma');
 const { authMiddleware } = require('../middleware/auth');
-const { createClient } = require('@supabase/supabase-js');
-const { Prisma } = require('@prisma/client');
+const { supabaseAdmin, supabaseAnon } = require('../lib/supabase');
 
 // --- Helper Function for Password Verification ---
 const verifyCurrentUserPassword = async (email, password) => {
-  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
-  const { error } = await supabase.auth.signInWithPassword({
+  const { error } = await supabaseAnon.auth.signInWithPassword({
     email,
     password,
   });
@@ -71,45 +68,42 @@ router.post('/profile', authMiddleware, async (req, res) => {
     if (!/^[a-zA-Z0-9_.-]{3,20}$/.test(profileData.username)) {
       return res.status(400).json({ message: "Username must be 3-20 characters long." });
     }
-    const existingUser = await prisma.user.findFirst({
-      where: { 
-        username: { equals: profileData.username, mode: 'insensitive' },
-        NOT: { supabaseAuthId: supabaseAuthId }
-      },
-    });
-    if (existingUser) return res.status(409).json({ message: "Username is already taken." });
+    const { data: existingUser, error: usernameError } = await supabaseAdmin
+      .from('User')
+      .select('id,username,supabaseAuthId')
+      .ilike('username', profileData.username)
+      .maybeSingle();
+    if (usernameError) throw usernameError;
+    if (existingUser && existingUser.supabaseAuthId !== supabaseAuthId) return res.status(409).json({ message: "Username is already taken." });
   }
 
   try {
-    const userProfile = await prisma.user.upsert({
-      where: { supabaseAuthId: supabaseAuthId },
-      update: profileData,
-      create: {
-        supabaseAuthId: supabaseAuthId,
-        email: email,
-        // --- FIX #2: Ensure `username` is always present in the `create` block ---
-        // We use the local user profile from the middleware to get the current username if it's not being updated.
-        username: profileData.username || req.localUser?.username,
-        ...profileData,
-      },
-    });
+    const payload = {
+      supabaseAuthId,
+      email,
+      username: profileData.username || req.localUser?.username,
+      ...profileData,
+    };
+    Object.keys(payload).forEach((key) => { if (payload[key] === undefined) delete payload[key]; });
 
+    const { data: userProfile, error: upsertError } = await supabaseAdmin
+      .from('User')
+      .upsert([payload], { onConflict: 'supabaseAuthId' })
+      .select()
+      .single();
+
+    if (upsertError) throw upsertError;
     res.status(200).json(userProfile);
 
   } catch (error) {
     console.error(`POST /api/users/profile error for Supabase user ${supabaseAuthId}:`, error);
-    
-    // Now that `Prisma` is imported, this check will work correctly.
-    if (error instanceof Prisma.PrismaClientValidationError) {
-        if (error.message.includes("Argument `username` is missing")) {
-            return res.status(400).json({ message: "A username is required to create your profile." });
-        }
-        return res.status(400).json({ message: "Invalid data provided.", details: error.message });
-    }
-    if (error.code === 'P2002') {
+    if (error.code === '23505' || error.message?.includes('unique constraint') || error.details?.includes('already exists')) {
       return res.status(409).json({ message: "This username is already registered." });
     }
-    res.status(500).json({ message: "An error occurred while saving the profile." });
+    if (error.message?.includes("username is missing")) {
+      return res.status(400).json({ message: "A username is required to create your profile." });
+    }
+    res.status(500).json({ message: "An error occurred while saving the profile.", details: error.message });
   }
 });
 
@@ -126,7 +120,6 @@ router.post('/update-password', authMiddleware, async (req, res) => {
         await verifyCurrentUserPassword(supabaseUser.email, currentPassword);
 
         // Step 2: If correct, update the user with the admin client.
-        const supabaseAdmin = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
         const { error: updateUserError } = await supabaseAdmin.auth.admin.updateUserById(
             supabaseUser.id,
             { password: newPassword }
@@ -157,7 +150,6 @@ router.post('/update-email', authMiddleware, async (req, res) => {
         await verifyCurrentUserPassword(supabaseUser.email, currentPassword);
 
         // Step 2: Update the email directly using the admin client.
-        const supabaseAdmin = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
         const { error: updateUserError } = await supabaseAdmin.auth.admin.updateUserById(
             supabaseUser.id,
             { email: trimmedNewEmail }
@@ -170,11 +162,9 @@ router.post('/update-email', authMiddleware, async (req, res) => {
             throw updateUserError; // Let the main catch block handle other errors
         }
 
-        // Step 3: Also update the email in our local Prisma database.
-        await prisma.user.update({
-            where: { supabaseAuthId: supabaseUser.id },
-            data: { email: trimmedNewEmail },
-        });
+        // Step 3: Also update the email in our local application profile.
+        const { error: updateEmailError } = await supabaseAdmin.from('User').update({ email: trimmedNewEmail }).eq('supabaseAuthId', supabaseUser.id);
+        if (updateEmailError) throw updateEmailError;
 
         res.status(200).json({ message: `Email updated successfully to ${trimmedNewEmail}.` });
     } catch (error) {

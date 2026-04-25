@@ -1,20 +1,22 @@
 const express = require('express');
 const router = express.Router();
-const prisma = require('../lib/prisma');
+const { supabaseAdmin } = require('../lib/supabase');
 
 // GET /api/page-blocks - Fetch all page blocks for the authenticated user for the editor
 router.get('/', async (req, res) => {
   try {
-    const blocks = await prisma.pageBlock.findMany({
-      where: { userId: req.localUser.id },
-      orderBy: { order: 'asc' },
-      include: {
-          _count: {
-              select: { payments: true } // Count how many payments are linked to wishlist blocks
-          }
-      }
-    });
-    res.json(blocks);
+    const { data: blocks, error } = await supabaseAdmin
+      .from('PageBlock')
+      .select('*, payments(id)')
+      .eq('userId', req.localUser.id)
+      .order('order', { ascending: true });
+
+    if (error) throw error;
+
+    res.json(blocks.map(({ payments, ...block }) => ({
+      ...block,
+      _count: { payments: payments?.length ?? 0 }
+    })));
   } catch (error) {
     console.error('[/api/page-blocks GET] Error fetching page blocks:', error);
     res.status(500).json({ message: 'Failed to fetch page blocks.' });
@@ -57,43 +59,36 @@ router.post('/bulk-update', async (req, res) => {
   }
 
   try {
-    // Use a transaction to perform the delete and create operations atomically.
-    const result = await prisma.$transaction(async (tx) => {
-      // 1. Delete all existing blocks for this user.
-      await tx.pageBlock.deleteMany({
-        where: { userId: userId },
-      });
+    const { error: deleteError } = await supabaseAdmin.from('PageBlock').delete().eq('userId', userId);
+    if (deleteError) throw deleteError;
 
-      // 2. If the new blocks array is not empty, create the new set.
-      if (blocks.length > 0) {
-        const newBlocksData = blocks.map((block, index) => ({
-          type: block.type,
-          order: index,
-          title: block.title,
-          url: block.type === 'LINK' ? block.url : null,
-          priceCents: block.type === 'WISHLIST' ? parseInt(block.priceCents) : null,
-          quantityGoal: (block.type === 'WISHLIST' && !block.isUnlimited) ? parseInt(block.quantityGoal) : null,
-          isUnlimited: block.type === 'WISHLIST' ? block.isUnlimited || false : false,
-          userId: userId,
-        }));
+    if (blocks.length > 0) {
+      const newBlocksData = blocks.map((block, index) => ({
+        type: block.type,
+        order: index,
+        title: block.title,
+        url: block.type === 'LINK' ? block.url : null,
+        priceCents: block.type === 'WISHLIST' ? parseInt(block.priceCents) : null,
+        quantityGoal: (block.type === 'WISHLIST' && !block.isUnlimited) ? parseInt(block.quantityGoal) : null,
+        isUnlimited: block.type === 'WISHLIST' ? block.isUnlimited || false : false,
+        userId: userId,
+      }));
 
-        await tx.pageBlock.createMany({
-          data: newBlocksData,
-        });
-      }
+      const { error: insertError } = await supabaseAdmin.from('PageBlock').insert(newBlocksData);
+      if (insertError) throw insertError;
+    }
 
-      // 3. Fetch the newly created blocks to return them with their generated IDs.
-      const createdBlocks = await tx.pageBlock.findMany({
-        where: { userId: userId },
-        orderBy: { order: 'asc' },
-        include: {
-            _count: {
-                select: { payments: true }
-            }
-        }
-      });
-      return createdBlocks;
-    });
+    const { data: createdBlocks, error: fetchError } = await supabaseAdmin
+      .from('PageBlock')
+      .select('*, payments(id)')
+      .eq('userId', userId)
+      .order('order', { ascending: true });
+    if (fetchError) throw fetchError;
+
+    const result = createdBlocks.map(({ payments, ...block }) => ({
+      ...block,
+      _count: { payments: payments?.length ?? 0 }
+    }));
 
     res.status(200).json({ success: true, message: "Page saved successfully!", data: result });
   } catch (error) {
