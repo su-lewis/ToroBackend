@@ -14,7 +14,7 @@ const authMiddleware = async (req, res, next) => {
   }
 
   try {
-    const { data: { user }, error } = await supabase.auth.getUser(token);
+    const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
 
     if (error) {
       console.warn('Supabase auth error:', error.message);
