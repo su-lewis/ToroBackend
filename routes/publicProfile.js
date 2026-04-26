@@ -32,6 +32,8 @@ router.get('/profile/:username', async (req, res) => {
     }));
 
     res.json({ ...user, pageBlocks: blocksWithCounts });
+  } catch (error) {
+    console.error("Error fetching public profile:", error);
     res.status(500).json({ message: 'Error fetching public profile', error: error.message });
   }
 });
