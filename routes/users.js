@@ -70,16 +70,16 @@ router.post('/profile', authMiddleware, async (req, res) => {
     }
     const { data: existingUser, error: usernameError } = await supabaseAdmin
       .from('User')
-      .select('id,username,supabaseAuthId')
+      .select('id,username,supabase_auth_id')
       .ilike('username', profileData.username)
       .maybeSingle();
     if (usernameError) throw usernameError;
-    if (existingUser && existingUser.supabaseAuthId !== supabaseAuthId) return res.status(409).json({ message: "Username is already taken." });
+    if (existingUser && existingUser.supabase_auth_id !== supabaseAuthId) return res.status(409).json({ message: "Username is already taken." });
   }
 
   try {
     const payload = {
-      supabaseAuthId,
+      supabase_auth_id: supabaseAuthId,
       email,
       username: profileData.username || req.localUser?.username,
       ...profileData,
@@ -88,7 +88,7 @@ router.post('/profile', authMiddleware, async (req, res) => {
 
     const { data: userProfile, error: upsertError } = await supabaseAdmin
       .from('User')
-      .upsert([payload], { onConflict: 'supabaseAuthId' })
+      .upsert([payload], { onConflict: 'supabase_auth_id' })
       .select()
       .single();
 
@@ -163,7 +163,7 @@ router.post('/update-email', authMiddleware, async (req, res) => {
         }
 
         // Step 3: Also update the email in our local application profile.
-        const { error: updateEmailError } = await supabaseAdmin.from('User').update({ email: trimmedNewEmail }).eq('supabaseAuthId', supabaseUser.id);
+        const { error: updateEmailError } = await supabaseAdmin.from('User').update({ email: trimmedNewEmail }).eq('supabase_auth_id', supabaseUser.id);
         if (updateEmailError) throw updateEmailError;
 
         res.status(200).json({ message: `Email updated successfully to ${trimmedNewEmail}.` });

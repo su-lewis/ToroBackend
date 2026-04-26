@@ -29,10 +29,10 @@ const authMiddleware = async (req, res, next) => {
 
     // --- Fetch the local user profile from Supabase using only the application fields we need.
     const { data: localUser, error: localUserError } = await supabaseAdmin.from('User').select(
-      `id, supabaseAuthId, email, username, displayName, bio, profileImageUrl, bannerImageUrl,
+      `id, supabase_auth_id, email, username, displayName, bio, profileImageUrl, bannerImageUrl,
        profileBackgroundColor, payoutsInUsd, autoInstantPayoutsEnabled, stripeAccountId,
        stripeOnboardingComplete, stripeAccountCountry, stripeDefaultCurrency, createdAt, updatedAt`
-    ).eq('supabaseAuthId', user.id).single();
+    ).eq('supabase_auth_id', user.id).single();
 
     if (localUserError && localUserError.code !== 'PGRST116') {
       console.error('Supabase local user lookup error:', localUserError);
