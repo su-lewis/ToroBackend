@@ -14,7 +14,10 @@ const PORT = process.env.PORT || 3001;
 // --- CORS Configuration ---
 const frontendUrlFromEnv = process.env.FRONTEND_URL;
 if (!frontendUrlFromEnv) { console.warn("WARNING: FRONTEND_URL environment variable is NOT SET."); }
-const allowedOrigins = [frontendUrlFromEnv].filter(Boolean);
+const allowedOrigins = [
+    frontendUrlFromEnv,
+    'http://localhost:3000',
+].filter(Boolean);
 const corsOptions = {
     origin: function (origin, callback) {
         if (!origin || allowedOrigins.indexOf(origin) !== -1) {
