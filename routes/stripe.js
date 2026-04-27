@@ -131,7 +131,7 @@ router.post('/create-checkout-session', async (req, res) => {
             // This is a Wishlist Item purchase
             const { data: wishlistItem, error: wishlistError } = await supabaseAdmin
               .from('PageBlock')
-              .select('*, payments(id)')
+              .select('*')
               .eq('id', pageBlockId)
               .eq('userId', recipientUser.id)
               .eq('type', 'WISHLIST')
@@ -144,7 +144,11 @@ router.post('/create-checkout-session', async (req, res) => {
             }
             if (!wishlistItem) return res.status(404).json({ message: 'Wishlist item not found.' });
             
-            const paymentCount = wishlistItem.payments?.length || 0;
+            const { count: paymentCount, error: countError } = await supabaseAdmin
+              .from('Payment')
+              .select('id', { count: 'exact', head: true })
+              .eq('pageBlockId', pageBlockId);
+            if (countError) throw countError;
             if (!wishlistItem.isUnlimited && paymentCount >= wishlistItem.quantityGoal) {
               return res.status(400).json({ message: 'This wishlist item goal has already been met.' });
             }

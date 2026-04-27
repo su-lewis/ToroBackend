@@ -21,7 +21,7 @@ router.get('/profile/:username', async (req, res) => {
 
     const { data: pageBlocks, error: blocksError } = await supabaseAdmin
       .from('PageBlock')
-      .select('*, payments(id)')
+      .select('*')
       .eq('userId', user.id)
       .order('order', { ascending: true });
     if (blocksError) throw blocksError;

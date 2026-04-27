@@ -7,7 +7,7 @@ router.get('/', async (req, res) => {
   try {
     const { data: blocks, error } = await supabaseAdmin
       .from('PageBlock')
-      .select('*, payments(id)')
+      .select('*')
       .eq('userId', req.localUser.id)
       .order('order', { ascending: true });
 
@@ -80,7 +80,7 @@ router.post('/bulk-update', async (req, res) => {
 
     const { data: createdBlocks, error: fetchError } = await supabaseAdmin
       .from('PageBlock')
-      .select('*, payments(id)')
+      .select('*')
       .eq('userId', userId)
       .order('order', { ascending: true });
     if (fetchError) throw fetchError;
