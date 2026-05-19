@@ -14,20 +14,20 @@ const { supabaseAdmin } = require('../lib/supabase');
 const { authMiddleware } = require('../middleware/auth');
 
 // --- Constants ---
-const PLATFORM_FEE_PERCENTAGE = 0.15;
-const PLATFORM_FEE_FIXED_CENTS = 100;
+const PLATFORM_FEE_PERCENTAGE = 0.10;
+const PLATFORM_FEE_FIXED_CENTS = 150;
 const MINIMUM_SEND_AMOUNT = 1.00;
 const MAXIMUM_SEND_AMOUNT = 2500.00;
 
-// 1. Create Onboarding Link
-router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
+// --- Helpers ---
+async function createStripeOnboardingLink(req, res) {
     try {
         const { country } = req.body;
         if (!country || !/^[A-Z]{2}$/.test(country)) {
             return res.status(400).json({ message: 'A valid 2-letter country code is required.' });
         }
         if (!req.localUser?.id) return res.status(403).json({ message: 'Application profile setup required first.' });
-        
+
         const appUserId = req.localUser.id;
         const appProfile = req.localUser;
         const emailForStripe = req.user?.email || appProfile?.email;
@@ -35,41 +35,51 @@ router.post('/connect/onboard-user', authMiddleware, async (req, res) => {
 
         let stripeAccountId = appProfile.stripeAccountId;
         if (!stripeAccountId) {
-            // This part is already correct.
             const accountParams = {
-                type: 'express', email: emailForStripe, country: country, business_type: 'individual',
-                business_profile: { url: `${platformBaseUrl}/${appProfile.username}`, mcc: '5815' },
-                capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
+                type: 'express',
+                email: emailForStripe,
+                country,
+                business_type: 'individual',
+                business_profile: {
+                    url: `${platformBaseUrl}/${appProfile.username}`,
+                    mcc: '5815',
+                },
+                capabilities: {
+                    card_payments: { requested: true },
+                    transfers: { requested: true }
+                }
             };
             const account = await stripe.accounts.create(accountParams);
             stripeAccountId = account.id;
             const { error: updateError } = await supabaseAdmin.from('User').update({
-                stripeAccountId: stripeAccountId,
+                stripeAccountId,
                 stripeAccountCountry: country,
                 stripeOnboardingComplete: false,
             }).eq('id', appUserId);
             if (updateError) throw updateError;
         }
-        
-        // --- THIS IS THE NEW, MORE ROBUST PART ---
+
         const accountLink = await stripe.accountLinks.create({
             account: stripeAccountId,
             refresh_url: `${platformBaseUrl}/connect-stripe?reauth=true`,
             return_url: `${platformBaseUrl}/connect-stripe?status=success`,
             type: 'account_onboarding',
-            // Add a prefill object to give Stripe a strong hint to use this data.
-            collect: 'eventually_due', // Standard for Express
+            collect: 'eventually_due',
             prefill: {
                 email: emailForStripe,
             },
         });
-        
+
         res.json({ url: accountLink.url });
     } catch (error) {
-        console.error('[/onboard-user] Error:', error.message, error.stack);
+        console.error('[/stripe/onboard] Error:', error.message, error.stack);
         res.status(500).json({ message: 'Error creating Stripe onboarding link', error: error.message });
     }
-});
+}
+
+// 1. Create Onboarding Link
+router.post('/onboard', authMiddleware, createStripeOnboardingLink);
+router.post('/connect/onboard-user', authMiddleware, createStripeOnboardingLink);
 
 // 2. Get Account Status
 router.get('/connect/account-status', authMiddleware, async (req, res) => {
@@ -97,6 +107,87 @@ router.get('/connect/account-status', authMiddleware, async (req, res) => {
     }
 });
 
+// 3. Create Stripe PaymentIntent with Separate Charges
+router.post('/create-payment-intent', async (req, res) => {
+    try {
+        if (!req.body) return res.status(400).json({ message: 'Request body is missing.' });
+
+        const { amount: amountForCreatorDollars, recipientUsername, donorName, pageBlockId } = req.body;
+        if (!recipientUsername) return res.status(400).json({ message: 'Recipient username is required.' });
+
+        const { data: recipientUser, error: recipientError } = await supabaseAdmin
+          .from('User')
+          .select('id,username,displayName,stripeAccountId,stripeOnboardingComplete,payoutsInUsd,stripeDefaultCurrency')
+          .eq('username', recipientUsername)
+          .single();
+
+        if (recipientError) throw recipientError;
+        if (!recipientUser || !recipientUser.stripeAccountId || !recipientUser.stripeOnboardingComplete) {
+            return res.status(400).json({ message: 'This creator is not set up for payments.' });
+        }
+
+        let chargeCurrency = recipientUser.payoutsInUsd ? 'usd' : (recipientUser.stripeDefaultCurrency || 'usd');
+        let creatorReceivesAmountInCents;
+        let productName;
+
+        if (pageBlockId) {
+            const { data: wishlistItem, error: wishlistError } = await supabaseAdmin
+              .from('PageBlock')
+              .select('id,title,priceCents,isUnlimited,quantityGoal')
+              .eq('id', pageBlockId)
+              .eq('userId', recipientUser.id)
+              .eq('type', 'WISHLIST')
+              .single();
+            if (wishlistError) throw wishlistError;
+            if (!wishlistItem) return res.status(404).json({ message: 'Wishlist item not found.' });
+
+            creatorReceivesAmountInCents = wishlistItem.priceCents;
+            productName = `Funding: ${wishlistItem.title}`;
+        } else {
+            if (!amountForCreatorDollars || isNaN(parseFloat(amountForCreatorDollars)) || 
+                parseFloat(amountForCreatorDollars) < MINIMUM_SEND_AMOUNT ||
+                parseFloat(amountForCreatorDollars) > MAXIMUM_SEND_AMOUNT
+            ) {
+                return res.status(400).json({ 
+                    message: `A valid amount (min ${MINIMUM_SEND_AMOUNT.toFixed(2)}, max ${MAXIMUM_SEND_AMOUNT.toFixed(2)}) is required.` 
+                });
+            }
+            creatorReceivesAmountInCents = Math.round(parseFloat(amountForCreatorDollars) * 100);
+            productName = `Support for ${recipientUser.displayName || recipientUser.username}`;
+        }
+
+        const platformFeeInCents = Math.round((creatorReceivesAmountInCents * PLATFORM_FEE_PERCENTAGE) + PLATFORM_FEE_FIXED_CENTS);
+        const grossAmountInCents = creatorReceivesAmountInCents + platformFeeInCents;
+
+        const MINIMUM_CHARGE_CENTS = { 'usd': 50, 'cad': 50, 'aud': 50, 'gbp': 30, 'eur': 50 };
+        if (grossAmountInCents < (MINIMUM_CHARGE_CENTS[chargeCurrency] || 50)) {
+            return res.status(400).json({ message: 'The total charge amount is below the minimum threshold.' });
+        }
+
+        const paymentIntent = await stripe.paymentIntents.create({
+            amount: grossAmountInCents,
+            currency: chargeCurrency,
+            payment_method_types: ['card'],
+            description: productName,
+            metadata: {
+                appRecipientUserId: recipientUser.id,
+                destination_account: recipientUser.stripeAccountId,
+                net_transfer_amount: creatorReceivesAmountInCents.toString(),
+                gross_charge_amount: grossAmountInCents.toString(),
+                platform_fee_amount: platformFeeInCents.toString(),
+                payment_currency: chargeCurrency,
+                donor_name: donorName ? donorName.substring(0, 100) : 'Anonymous',
+                pageBlockId: pageBlockId || '',
+            },
+        });
+
+        res.json({ clientSecret: paymentIntent.client_secret, amount: grossAmountInCents, currency: chargeCurrency });
+    } catch (error) {
+        console.error('[/create-payment-intent] Error:', error.message, error.stack);
+        res.status(500).json({ message: 'Error creating payment intent', error: error.message });
+    }
+});
+
 // 3. Create Stripe Checkout Session
 router.post('/create-checkout-session', async (req, res) => {
     try {
@@ -107,6 +198,7 @@ router.post('/create-checkout-session', async (req, res) => {
 
         const { data: recipientUser, error: recipientError } = await supabaseAdmin
           .from('User')
+
           .select('id,username,displayName,stripeAccountId,stripeOnboardingComplete,payoutsInUsd,stripeDefaultCurrency')
           .eq('username', recipientUsername)
           .single();
@@ -198,23 +290,16 @@ router.post('/create-checkout-session', async (req, res) => {
             mode: 'payment',
             success_url: `${process.env.FRONTEND_URL}/payment-success?recipient=${recipientUsername}&amount_sent=${(creatorReceivesAmountInCents / 100).toFixed(2)}`,
             cancel_url: `${process.env.FRONTEND_URL}/${recipientUser.username}?payment_cancelled=true`,
-            payment_intent_data: {
-                on_behalf_of: recipientUser.stripeAccountId,
-                transfer_data: {
-                    destination: recipientUser.stripeAccountId,
-                    amount: creatorReceivesAmountInCents
-                }
-            },
             billing_address_collection: 'required',
             metadata: {
                 appRecipientUserId: recipientUser.id,
-                grossAmountChargedToDonor: grossAmountInCents.toString(),
-                intendedAmountForCreator: creatorReceivesAmountInCents.toString(),
-                platformFeeCalculated: platformFeeInCents.toString(),
-                paymentCurrency: chargeCurrency,
-                donorName: donorName ? donorName.substring(0, 100) : 'Anonymous',
-                // --- CHANGE 3: Add `pageBlockId` to metadata if it exists ---
-                pageBlockId: pageBlockId || null,
+                destination_account: recipientUser.stripeAccountId,
+                net_transfer_amount: creatorReceivesAmountInCents.toString(),
+                gross_charge_amount: grossAmountInCents.toString(),
+                platform_fee_amount: platformFeeInCents.toString(),
+                payment_currency: chargeCurrency,
+                donor_name: donorName ? donorName.substring(0, 100) : 'Anonymous',
+                pageBlockId: pageBlockId || '',
             },
         });
 

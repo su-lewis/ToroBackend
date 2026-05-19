@@ -2,6 +2,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const cron = require('node-cron');
 const { supabaseAdmin } = require('./lib/supabase');
 const { Resend } = require('resend');
 // Initialize Stripe and Resend directly in this file
@@ -271,11 +272,7 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
                 break;
             }
             if (userToUpdate) {
-                // --- THIS IS THE FIX ---
-                // We must define `onboardingComplete` by checking the account's status.
                 const onboardingComplete = !!(account.charges_enabled && account.details_submitted && account.payouts_enabled);
-
-                // Now we can safely compare the new status with the one in our database.
                 if (userToUpdate.stripeOnboardingComplete !== onboardingComplete) {
                     const { error: updateError } = await supabaseAdmin.from('User').update({ stripeOnboardingComplete: onboardingComplete }).eq('id', userToUpdate.id);
                     if (updateError) console.error(`[Connect Webhook] DB Error updating onboarding status:`, updateError);
@@ -285,6 +282,136 @@ app.post('/api/stripe/connect-webhook', express.raw({ type: 'application/json' }
             break;
         }
     }
+    res.status(200).json({ received: true });
+});
+
+// --- STRIPE PAYMENT WEBHOOK ---
+app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+    if (!webhookSecret) {
+        console.error('FATAL: STRIPE_WEBHOOK_SECRET env var is not set.');
+        return res.status(500).send('Stripe Webhook secret not configured.');
+    }
+
+    let event;
+    try {
+        event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    } catch (err) {
+        console.error(`[Stripe Webhook] Signature verification failed: ${err.message}`);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    console.log(`[Stripe Webhook] Event received: ${event.type} (ID: ${event.id})`);
+
+    if (event.type === 'charge.succeeded') {
+        const charge = event.data.object;
+        const fingerprint = charge.payment_method_details?.card?.fingerprint;
+        const metadata = charge.metadata || {};
+        const destinationAccount = metadata.destination_account || metadata.destinationAccount;
+        const netTransferAmountCents = parseInt(metadata.net_transfer_amount || metadata.intendedAmountForCreator || metadata.net_transfer_amount, 10);
+        const paymentIntentId = charge.payment_intent;
+        const stripeChargeId = charge.id;
+        const recipientUserId = metadata.appRecipientUserId;
+
+        if (!fingerprint || !destinationAccount || !netTransferAmountCents || !recipientUserId) {
+            console.error('[Stripe Webhook] Missing required metadata or fingerprint for charge.succeeded.');
+            return res.status(400).send('Missing required metadata or fingerprint.');
+        }
+
+        try {
+            const { data: existingPayment, error: paymentLookupError } = await supabaseAdmin
+                .from('Payment')
+                .select('id')
+                .eq('stripeChargeId', stripeChargeId)
+                .maybeSingle();
+            if (paymentLookupError) throw paymentLookupError;
+
+            if (!existingPayment) {
+                const { error: insertPaymentError } = await supabaseAdmin.from('Payment').insert([{
+                    stripeChargeId,
+                    stripePaymentIntentId: paymentIntentId,
+                    amount: charge.amount,
+                    currency: charge.currency,
+                    status: 'SUCCEEDED',
+                    recipientUserId,
+                    platformFee: charge.amount - netTransferAmountCents,
+                    netAmountToRecipient: netTransferAmountCents,
+                    payerName: charge.billing_details?.name || metadata.donor_name || 'Anonymous',
+                    payerEmail: charge.billing_details?.email || null,
+                    pageBlockId: metadata.pageBlockId || null,
+                }] );
+                if (insertPaymentError) throw insertPaymentError;
+            }
+
+            const { data: existingTransfer, error: transferLookupError } = await supabaseAdmin
+                .from('pending_transfers')
+                .select('id')
+                .eq('stripe_charge_id', stripeChargeId)
+                .maybeSingle();
+            if (transferLookupError) throw transferLookupError;
+            if (existingTransfer) {
+                console.log('[Stripe Webhook] Transfer already recorded for charge', stripeChargeId);
+                return res.status(200).json({ received: true });
+            }
+
+            const { data: trustedCard, error: trustedCardError } = await supabaseAdmin
+                .from('trusted_cards')
+                .select('fingerprint')
+                .eq('fingerprint', fingerprint)
+                .maybeSingle();
+            if (trustedCardError) throw trustedCardError;
+
+            if (!trustedCard) {
+                const { error: trustedInsertError } = await supabaseAdmin.from('trusted_cards').insert([{
+                    fingerprint,
+                    created_at: new Date().toISOString(),
+                }]);
+                if (trustedInsertError) throw trustedInsertError;
+
+                const unlockDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+                const { error: pendingInsertError } = await supabaseAdmin.from('pending_transfers').insert([{
+                    amount_cents: netTransferAmountCents,
+                    currency: charge.currency,
+                    destination_account: destinationAccount,
+                    unlock_date: unlockDate,
+                    status: 'pending',
+                    stripe_charge_id: stripeChargeId,
+                    payment_intent_id: paymentIntentId,
+                    recipient_user_id: recipientUserId,
+                }]);
+                if (pendingInsertError) throw pendingInsertError;
+
+                console.log('[Stripe Webhook] New card fingerprint; scheduled pending transfer for', destinationAccount);
+            } else {
+                const transfer = await stripe.transfers.create({
+                    amount: netTransferAmountCents,
+                    currency: charge.currency,
+                    destination: destinationAccount,
+                    transfer_group: paymentIntentId ? `pi_${paymentIntentId}` : undefined,
+                });
+
+                const { error: completedInsertError } = await supabaseAdmin.from('pending_transfers').insert([{
+                    amount_cents: netTransferAmountCents,
+                    currency: charge.currency,
+                    destination_account: destinationAccount,
+                    unlock_date: new Date().toISOString(),
+                    status: 'completed',
+                    stripe_charge_id: stripeChargeId,
+                    stripe_transfer_id: transfer.id,
+                    payment_intent_id: paymentIntentId,
+                    recipient_user_id: recipientUserId,
+                }]);
+                if (completedInsertError) throw completedInsertError;
+
+                console.log('[Stripe Webhook] Immediate transfer executed', transfer.id);
+            }
+        } catch (err) {
+            console.error('[Stripe Webhook] Processing error:', err);
+            return res.status(500).send(`Webhook processing failed: ${err.message}`);
+        }
+    }
+
     res.status(200).json({ received: true });
 });
 
@@ -305,6 +432,49 @@ app.use('/api/payments', authMiddleware, paymentRoutes);
 app.use('/api/page-blocks', authMiddleware, pageBlockRoutes);
 
 app.get('/api', (req, res) => res.status(200).json({ status: 'healthy' }));
+
+// --- HOURLY TRANSFER WORKER ---
+cron.schedule('0 * * * *', async () => {
+    console.log('[Transfer Worker] Running hourly pending transfer job.');
+    try {
+        const nowIso = new Date().toISOString();
+        const { data: pendingTransfers, error: pendingError } = await supabaseAdmin
+            .from('pending_transfers')
+            .select('*')
+            .lte('unlock_date', nowIso)
+            .eq('status', 'pending');
+
+        if (pendingError) throw pendingError;
+        if (!pendingTransfers || pendingTransfers.length === 0) {
+            console.log('[Transfer Worker] No pending transfers ready to run.');
+            return;
+        }
+
+        for (const transfer of pendingTransfers) {
+            try {
+                const createdTransfer = await stripe.transfers.create({
+                    amount: transfer.amount_cents,
+                    currency: transfer.currency,
+                    destination: transfer.destination_account,
+                    transfer_group: transfer.payment_intent_id ? `pi_${transfer.payment_intent_id}` : undefined,
+                });
+
+                const { error: updateError } = await supabaseAdmin.from('pending_transfers')
+                    .update({ status: 'completed', stripe_transfer_id: createdTransfer.id, completed_at: new Date().toISOString() })
+                    .eq('id', transfer.id);
+                if (updateError) throw updateError;
+                console.log('[Transfer Worker] Completed transfer for pending_transfer', transfer.id);
+            } catch (transferError) {
+                console.error('[Transfer Worker] Failed to execute transfer for pending_transfer', transfer.id, transferError.message);
+            }
+        }
+    } catch (err) {
+        console.error('[Transfer Worker] Error querying pending transfers:', err.message || err);
+    }
+}, {
+    scheduled: true,
+    timezone: 'UTC'
+});
 
 // --- ERROR HANDLING & SERVER START ---
 app.use((err, req, res, next) => {
